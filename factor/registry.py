@@ -23,12 +23,12 @@ FACTORS: dict[str, FactorDef] = {
         file="cvd_divergence.py",
         windows=[60],
         output_range=(-3.0, 3.0),
+    ),
     "residual_momentum": FactorDef(
         name="residual_momentum",
         file="residual_momentum.py",
         windows=[288],
         output_range=(-3.0, 3.0),
-    ),
     ),
 }
 

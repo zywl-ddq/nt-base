@@ -29,7 +29,6 @@ def _load_factor_code(code: str) -> str:
     from pathlib import Path
     for factors_dir in (
         Path("/root/nt-base/factors"),
-        Path("/root/nt-base/factors"),
     ):
         candidate = factors_dir / f"{code}.py"
         if candidate.exists():

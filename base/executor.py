@@ -8,11 +8,11 @@ logger = logging.getLogger(__name__)
 
 
 class OrderExecutor:
-    def __init__(self, sol_id, venue, portfolio, order_factory, cache):
+    def __init__(self, sol_id, venue, portfolio, submit_order, cache):
         self._sol_id = sol_id
         self._venue = venue
         self._portfolio = portfolio
-        self._order_factory = order_factory
+        self._submit_order = submit_order  # callable: Strategy.submit_order
         self._cache = cache
 
     def execute(self, slot: StrategySlot, signal: StrategySignal,
@@ -39,6 +39,17 @@ class OrderExecutor:
             self._open(OrderSide.BUY if target_long else OrderSide.SELL, current_price, slot, signal.reason)
             return f"entry {slot.entry_side}"
 
+    def _create_market_order(self, instrument_id, order_side, quantity, time_in_force):
+        """Create a market order. Uses Strategy's order_factory if available."""
+        return self._cache.instrument(instrument_id).create_order(
+            order_side=order_side,
+            quantity=quantity,
+            time_in_force=time_in_force,
+            post_only=False,
+            reduce_only=False,
+            quote_quantity=False,
+        )
+
     def _get_position(self):
         for p in self._cache.positions_open(instrument_id=self._sol_id):
             if float(p.quantity.as_decimal()) > 0:
@@ -53,11 +64,11 @@ class OrderExecutor:
         equity = float(account.balance_total().as_decimal())
         notional = equity * slot.position_size_pct * slot.leverage
         qty = instr.make_qty(Decimal(str(notional / float(price))))
-        order = self._order_factory.market(
+        order = self._create_market_order(
             instrument_id=self._sol_id, order_side=side,
             quantity=qty, time_in_force=TimeInForce.IOC,
         )
-        self._order_factory.submit_order(order)
+        self._submit_order(order)
         slot.open_position("LONG" if side.name == "BUY" else "SHORT", price)
         slot.last_trade_time = time.time()
 
@@ -67,11 +78,11 @@ class OrderExecutor:
             return False
         from nautilus_trader.model.enums import OrderSide, TimeInForce
         side = OrderSide.SELL if pos.side.name == "LONG" else OrderSide.BUY
-        order = self._order_factory.market(
+        order = self._create_market_order(
             instrument_id=self._sol_id, order_side=side,
             quantity=pos.quantity, time_in_force=TimeInForce.IOC,
         )
-        self._order_factory.submit_order(order)
+        self._submit_order(order)
         slot.reset_position()
         logger.info(f"FLAT {slot.strategy_id} reason={reason}")
         return True

@@ -32,7 +32,13 @@ class RiskLoop:
     async def _run(self):
         while self._running:
             for slot in self._registry.get_active_slots():
-                price = self._prices.get("SOLUSDT-PERP.BINANCE", 0)
+                # Find price for this slot's symbol from subscriptions
+                price = 0.0
+                for sub in slot.subscriptions:
+                    p = self._prices.get(sub.symbol, 0)
+                    if p > 0:
+                        price = p
+                        break
                 if price <= 0:
                     continue
 

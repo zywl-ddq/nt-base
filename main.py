@@ -112,7 +112,7 @@ async def main():
 
     # Factor computation buffer
     from collections import deque
-    _bar_buffer: deque[dict] = deque(maxlen=120)
+    _bar_buffer: deque[dict] = deque(maxlen=300)
 
     if dm_actor:
         _original_on_bar = dm_actor.on_bar
