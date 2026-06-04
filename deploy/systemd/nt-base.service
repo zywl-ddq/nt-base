@@ -1,0 +1,26 @@
+[Unit]
+Description=nt-base · Trading Base Service
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/nt-base
+EnvironmentFile=/root/nt-base/.env
+Environment=PYTHONPATH=/root/nt-base
+ExecStartPre=/bin/bash -c 'until docker exec timescaledb pg_isready -U nautilus_admin -d trading_data; do sleep 2; done'
+ExecStart=/root/miniconda3/envs/nautilus/bin/python -u main.py
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=60
+StandardOutput=append:/root/nt-base/logs/nt_base.log
+StandardError=append:/root/nt-base/logs/nt_base.log
+LimitNOFILE=65536
+MemoryMax=6G
+TasksMax=2048
+
+[Install]
+WantedBy=multi-user.target
