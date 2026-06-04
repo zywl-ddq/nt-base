@@ -90,15 +90,29 @@ async def main():
     node.build()
 
     # ── Wire bar dispatch ──
+    # Find DataManageActor — NT stores actors in trader._actors (list or dict)
     dm_actor = None
-    for actor in node.trader._actors:
-        try:
-            name = type(actor).__name__
-        except Exception:
-            name = ""
-        if "DataManage" in name or "DataManageActor" in name:
-            dm_actor = actor
-            break
+    actors_container = getattr(node.trader, "_actors", None)
+    if actors_container is None:
+        logger.warning("node.trader._actors not found, trying _components")
+        actors_container = getattr(node.trader, "_components", [])
+
+    if isinstance(actors_container, dict):
+        for actor in actors_container.values():
+            if "DataManageActor" in type(actor).__name__:
+                dm_actor = actor
+                break
+    elif hasattr(actors_container, "__iter__"):
+        for actor in actors_container:
+            if "DataManageActor" in type(actor).__name__:
+                dm_actor = actor
+                break
+
+    logger.info(f"dm_actor lookup: found={dm_actor is not None}, actors_count={len(actors_container) if hasattr(actors_container, '__len__') else '?'}")
+
+    # Factor computation buffer
+    from collections import deque
+    _bar_buffer: deque[dict] = deque(maxlen=120)
 
     if dm_actor:
         _original_on_bar = dm_actor.on_bar
@@ -108,6 +122,15 @@ async def main():
             iid = str(bar.bar_type.instrument_id)
             base_strat.update_price(iid, float(bar.close))
 
+            # Buffer all bars for factor computation
+            _bar_buffer.append({
+                "ts": bar.ts_event,
+                "open": float(bar.open),
+                "high": float(bar.high),
+                "low": float(bar.low),
+                "close": float(bar.close),
+            })
+
             if "1-MINUTE" not in str(bar.bar_type.spec):
                 return
 
@@ -116,13 +139,33 @@ async def main():
             if not slots or not executor:
                 return
 
+            # Compute factors that have strategy subscribers
+            factors = {}
+            active = registry.active_factors()
+            if active and len(_bar_buffer) >= 30:
+                import pandas as pd
+                df = pd.DataFrame(list(_bar_buffer))
+                df["ts"] = pd.to_datetime(df["ts"])
+                df = df.set_index("ts")
+                df["volume"] = 0.0
+                df["delta"] = 0.0
+
+                from factor.compute import compute_factor_history
+                for fname in active:
+                    try:
+                        series = compute_factor_history(fname, df)
+                        val = series.dropna().iloc[-1] if len(series.dropna()) > 0 else 0.0
+                        factors[fname] = float(val)
+                    except Exception:
+                        factors[fname] = 0.0
+
             for slot in slots:
                 bar_data = {
                     "close": float(bar.close),
                     "high": float(bar.high),
                     "low": float(bar.low),
                     "ts_ns": bar.ts_event,
-                    "factors": {},
+                    "factors": factors,
                 }
                 signal = slot.strategy.on_bar(bar_data)
                 if signal and signal.direction != 0:
@@ -130,7 +173,7 @@ async def main():
                     logger.info(f"Signal: {slot.strategy_id} {signal.direction} -> {result}")
 
         dm_actor.on_bar = _on_bar_with_dispatch
-        logger.info("Bar dispatch wired: DataManageActor -> strategies -> executor")
+        logger.info("Bar dispatch wired: DataManageActor -> factors -> strategies -> executor")
 
     # Graceful shutdown
     def _shutdown():
