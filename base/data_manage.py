@@ -159,7 +159,7 @@ class DataManageActor(Actor):
                 tf_u = tf.upper()
                 # INTERNAL (NT aggregates from ticks) for sub-minute bars
                 # EXTERNAL (Binance provides pre-built klines) for minute+ bars
-                src = "EXTERNAL" if ("MINUTE" in tf_u or "HOUR" in tf_u or "DAY" in tf_u) else "INTERNAL"
+                src = "INTERNAL"  # all bars aggregated from trade ticks
                 bt_str = f"{s}-{tf_u}-LAST-{src}"
                 bt = BarType.from_str(bt_str)
                 topic = f"data.bars.{bt}"

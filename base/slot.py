@@ -1,4 +1,4 @@
-"""StrategySlot — runtime state for a registered strategy."""
+"""StrategySlot 鈥?runtime state for a registered strategy."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 import time
@@ -17,6 +17,11 @@ class StrategySlot:
     cooldown_sec: float = 60.0
     leverage: int = 2
     position_size_pct: float = 0.20
+    symbol: str = ""
+
+    # Telegram notification (per-strategy bot)
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
 
     # Runtime state
     has_position: bool = False
@@ -27,6 +32,12 @@ class StrategySlot:
     daily_pnl: float = 0.0
     daily_start_equity: float = 0.0
     tripped: bool = False
+
+    @property
+    def held_sec(self) -> float:
+        if not self.has_position:
+            return 0.0
+        return time.time() - self.entry_time
 
     def reset_position(self):
         self.has_position = False
@@ -39,9 +50,3 @@ class StrategySlot:
         self.entry_side = side
         self.entry_price = price
         self.entry_time = time.time()
-
-    @property
-    def held_sec(self) -> float:
-        if not self.has_position:
-            return 0.0
-        return time.time() - self.entry_time

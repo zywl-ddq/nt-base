@@ -12,6 +12,7 @@ from base.trading_node import build_trading_node
 from base.registry import StrategyRegistry
 from base.executor import OrderExecutor
 from risk.loop import RiskLoop
+from base.registration import RegistrationManager
 from nautilus_trader.trading.strategy import Strategy
 from nautilus_trader.model.identifiers import InstrumentId, Venue
 
@@ -36,7 +37,7 @@ class BaseStrategy(Strategy):
         self._executor = OrderExecutor(
             sol_id=sol_id, venue=venue,
             portfolio=self.portfolio,
-            order_factory=self.order_factory,
+            submit_order=self.submit_order,
             cache=self.cache,
         )
         self._risk_loop = RiskLoop(self._registry, self._executor)
@@ -88,6 +89,10 @@ async def main():
     node.trader.add_strategy(base_strat)
 
     node.build()
+
+    reg_mgr = RegistrationManager(registry, pool, symbol="SOLUSDT-PERP", timeframe="1m")
+    reg_task = asyncio.create_task(reg_mgr.run())
+    logger.info("RegistrationManager started")
 
     # ── Wire bar dispatch ──
     # Find DataManageActor — NT stores actors in trader._actors (list or dict)
@@ -193,6 +198,10 @@ async def main():
         pass
     finally:
         logger.info("Shutting down...")
+        await reg_mgr.stop()
+        reg_task.cancel()
+        try: await reg_task
+        except asyncio.CancelledError: pass
         node.dispose()
         await close_pool()
         logger.info("nt-base stopped")
