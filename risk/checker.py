@@ -1,5 +1,30 @@
-"""Risk checker — pure functions for stop/take/hold/daily checks."""
+"""
+Module:    risk/checker
+Purpose:   Risk check functions for position management.
+           Each function takes a StrategySlot + current price and returns
+           a CheckResult indicating whether to exit the position.
+
+Interface:
+  CheckResult (dataclass)  鈥?should_exit: bool, reason: str
+  check_stop(slot, price)  鈥?hard stop-loss check
+  check_take(slot, price)  鈥?take-profit check
+  check_hold(slot, price)  鈥?max hold time check
+  check_daily(slot)        鈥?daily loss limit check
+
+Exit Conditions:
+  check_stop:   current_pnl% <= -stop_pct   (e.g. price dropped 3% from entry)
+  check_take:   current_pnl% >= take_pct    (e.g. price rose 6% from entry)
+  check_hold:   held_sec >= max_hold_sec    (position held too long)
+  check_daily:  daily_pnl <= -max_daily_loss_pct * daily_start_equity
+
+Pre-condition:
+  All checks assume slot.has_position == True (caller guarantees this).
+
+Author:    nt-base system
+Version:   1.0.0
+"""
 from __future__ import annotations
+"""Risk checker — pure functions for stop/take/hold/daily checks."""
 from dataclasses import dataclass
 from base.slot import StrategySlot
 

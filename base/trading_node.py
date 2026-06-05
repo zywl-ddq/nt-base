@@ -1,5 +1,26 @@
-"""TradingNode builder — Binance data + sandbox execution."""
+"""
+Module:    base/trading_node
+Purpose:   NautilusTrader TradingNode factory. Builds and configures the
+           sandbox trading node with Binance Futures testnet connectivity.
+
+Interface: build_trading_node(api_key, api_secret, leverage, initial_usdt) -> TradingNode
+
+Configuration:
+  - SandboxExecutionClient (paper trading, no real funds)
+  - Binance USDT Futures testnet
+  - NETTING OMS type (one position per symbol)
+  - Default leverage configurable
+  - Starting balance from SANDBOX_INITIAL_USDT env var
+  - NO Binance data client (bars come from WebSocket aggregation + DataManageActor)
+
+Security:
+  API credentials passed as parameters (sourced from environment, never hardcoded).
+
+Author:    nt-base system
+Version:   1.0.0
+"""
 from __future__ import annotations
+"""TradingNode builder — Binance data + sandbox execution."""
 from decimal import Decimal
 from nautilus_trader.adapters.binance.common.enums import BinanceAccountType
 from nautilus_trader.adapters.binance.config import BinanceDataClientConfig

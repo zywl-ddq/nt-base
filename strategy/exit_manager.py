@@ -1,3 +1,47 @@
+"""
+Module:    strategy/exit_manager
+Purpose:   4-layer dynamic exit system for position management.
+           Pure logic 鈥?zero NautilusTrader or I/O dependencies.
+           Fully learnable by RD-Agent (all params in ExitConfig).
+
+Layers:
+  L1 鈥?Smart Exit (immediate):
+       BTC 1m shock (>0.85% drop exits long, >0.75% rise exits short)
+       CVD direction reversal (4 of last 5 deltas disagree)
+
+  L2 鈥?Time Decay (normal):
+       Position held beyond time_limit without minimum profit
+       Absolute max hold time exceeded
+
+  L3 鈥?Breakeven Ladder (normal):
+       Once profit > breakeven_atr_mult * ATR, move stop to entry + fees
+       Prevents winning trades from becoming losers
+
+  L4 鈥?ATR Trailing (normal):
+       Once profit > trail_trigger_atr * ATR, trail stop at trail_stop_atr * ATR
+       from HH (long) or LL (short)
+
+Data Classes:
+  ExitState   鈥?mutable per-position state (entry, bars_held, breakeven flag, HH/LL)
+  ExitAction  鈥?signal to strategy: reason string + urgency ("immediate" / "normal")
+  ExitConfig  鈥?frozen, all parameters learnable
+
+Class: ExitManager
+  compute_atr(highs, lows) -> float
+      ATR from 1m high/low bars (simple TR = high - low, mean of N periods).
+
+  evaluate(current_price, current_atr, btc_ret_1m, recent_deltas, state, regime) -> ExitAction|None
+      Evaluate all 4 layers. Returns ExitAction to close, or None to hold.
+
+Pre-conditions:
+  - state.is_long must be set before first evaluate()
+  - At least 3 bars of high/low data for valid ATR
+  - regime parameter controls CVD suppression (CVD only in ranging markets)
+
+Author:    nt-base / trading-v2
+Version:   1.0.0
+"""
+from __future__ import annotations
 """ExitManager -- 4-layer dynamic exit system.
 
 Extracted from IntradayFactor._evaluate_dynamic_exits() (trading-infra).
@@ -9,7 +53,6 @@ Layers:
   L3 — Breakeven Ladder: profit > threshold -> move stop to entry + fees
   L4 — ATR Trailing: profit > trigger -> trail stop at HH/LL
 """
-from __future__ import annotations
 
 from dataclasses import dataclass, field
 

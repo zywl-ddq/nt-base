@@ -1,3 +1,59 @@
+"""
+Module:    strategy/signal
+Purpose:   Multi-factor signal composer with hierarchical trend gating.
+           Rank-normalizes factor values, computes weighted composite,
+           applies EMA smoothing and threshold gating.
+
+Architecture:
+  trend_regime     -> GATE    (determines allowed direction: -1/0/+1)
+  cvd_divergence   -> SIGNAL  (order-flow imbalance)
+  residual_momentum-> SIGNAL  (SOL alpha vs BTC)
+  future factors   -> SIGNAL  (extensible)
+
+  Key difference from v1: trend_regime does NOT vote 鈥?it gates.
+  Ranging markets (regime=0): both directions pass the gate.
+
+Class: SignalComposer
+  gate_factor: str            name of the trend/regime factor used as gate
+  signal_factors: list        list of (name, direction, weight) tuples
+
+  update(factor_name, value) -> float
+      Push a factor value. Returns percentile rank for signal factors,
+      raw value for gate factor. Buffer-based (rolling window of 30).
+
+  composite() -> float
+      Weighted rank-normalized composite from signal factors.
+      Range [-0.5, 0.5]. Negative = SHORT bias, Positive = LONG bias.
+      Single factor: weight acts as amplifier (capped).
+      Multi-factor: weighted average.
+
+  direction(threshold=0.15) -> int
+      EMA-smoothed composite, gated by trend regime.
+      Returns -1 (SHORT), 0 (HOLD), +1 (LONG).
+
+  regime -> int
+      Current trend regime via majority vote of last 5 gate values.
+      -1 = downtrend, 0 = ranging, +1 = uptrend.
+
+Factory: build_signal_composer(gate_factor, factor_1..5, direction_1..5, weight_1..5)
+      Convenience constructor mapping slot-style params to SignalComposer.
+
+Design Decision:
+  Rank normalization: each factor's value is converted to percentile rank
+  within its rolling buffer (30 samples). This handles factors with different
+  scales and distributions. The weight parameter controls relative influence
+  in multi-factor mode and absolute amplification in single-factor mode.
+
+Edge Cases:
+  - Buffer < 5: returns default rank 0.5 (neutral)
+  - Single factor: weight amplifies/dampens signal (v1.1 fix)
+  - Empty gate: all directions allowed (regime=0)
+  - EMA alpha=0.08: requires ~3-4 consistent bars to cross typical threshold
+
+Author:    nt-base / trading-v2
+Version:   1.1.0 (single-factor weight amplification)
+"""
+from __future__ import annotations
 """SignalComposer v2 — hierarchical factor gating.
 
 Architecture:
@@ -13,7 +69,6 @@ Architecture:
 Key difference from v1: trend_regime does NOT vote — it gates.
 Ranging markets (regime=0): both directions pass the gate.
 """
-from __future__ import annotations
 
 from collections import deque
 

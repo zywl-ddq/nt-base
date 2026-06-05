@@ -1,5 +1,37 @@
-"""Telegram notifier - async fire-and-forget."""
+"""
+Module:    base/notify
+Purpose:   Lightweight Telegram Bot API sender. Zero third-party dependencies
+           (stdlib only: urllib + asyncio + html). Supports per-strategy bot tokens.
+
+Interface:
+  send_message(token, chat_id, text) -> None   fire-and-forget async send
+  fmt_entry(slot_id, symbol, side, price, qty, notional, reason) -> str
+  fmt_close(slot_id, symbol, side_was, entry_px, exit_px, pnl, held_sec, reason) -> str
+  fmt_reverse(slot_id, symbol, from_side, to_side, price, reason) -> str
+  fmt_risk_exit(slot_id, symbol, side, price, reason, pnl) -> str
+  fmt_daily_trip(slot_id, symbol, daily_pnl, loss_limit) -> str
+  fmt_strategy_start(slot_id, symbol, leverage, pos_pct) -> str
+
+Design Decisions:
+  - urllib (not aiohttp/httpx): zero additional deps, sufficient for low-volume alerts
+  - HTML parse_mode: supports <b>/<code>/<pre> formatting
+  - Fire-and-forget: notifications never block the trading loop
+  - Plain text fallback: Telegram HTML parser quirks are caught silently
+
+Security:
+  - Token never logged (only used in HTTP POST)
+  - HTML-escaping prevents injection via symbol names or reason strings
+  - 5-second timeout prevents hanging on Telegram API outage
+
+Performance:
+  - _send_sync runs in thread pool executor (loop.run_in_executor)
+  - HTTP connection not reused (simplicity over micro-optimization for alert volume)
+
+Author:    nt-base system
+Version:   1.0.0
+"""
 from __future__ import annotations
+"""Telegram notifier - async fire-and-forget."""
 
 import asyncio
 import json

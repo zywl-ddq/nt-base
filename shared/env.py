@@ -1,3 +1,28 @@
+"""
+Module:    shared/env
+Purpose:   Centralized environment configuration loader.
+           Reads .env file once at import time, exposes typed AppCfg dataclass.
+           All other modules MUST import cfg from here 鈥?never call os.getenv directly.
+
+Interface: cfg: AppCfg          鈥?typed configuration singleton
+           assert_required()    鈥?raises RuntimeError if critical secrets missing
+
+Configuration Sections:
+  BinanceCfg    鈥?exchange API credentials
+  TelegramCfg   鈥?bot token and admin chat
+  TimescaleCfg  鈥?database host/port/user/password, exposes .dsn property
+  LLMCfg        鈥?LLM provider/model/API key
+  AppCfg        鈥?top-level: mode, symbols, risk params, sub-configs
+
+Security:
+  Secrets sourced from environment only (os.environ).
+  .env file parsed defensively (strips inline comments, respects existing env vars).
+  assert_required() must be called at every entrypoint before trading begins.
+
+Author:    nt-base system
+Version:   1.0.0
+"""
+from __future__ import annotations
 """Centralized environment loader.
 
 Reads /root/nt-base/.env once and exposes a typed `cfg` object.
@@ -5,7 +30,6 @@ All other modules MUST import `from shared.env import cfg` instead of
 calling os.getenv directly.
 """
 
-from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field

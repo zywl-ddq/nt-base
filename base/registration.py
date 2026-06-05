@@ -1,3 +1,47 @@
+"""
+Module:    base/registration
+Purpose:   Dynamic strategy lifecycle manager. Polls strategy_instances table
+           and hot-registers/unregisters strategies without service restart.
+
+Class: RegistrationManager
+  __init__(registry, pool, symbol, timeframe)
+      registry: StrategyRegistry   鈥?target registry for dynamic registration
+      pool: asyncpg.Pool           鈥?DB connection pool for polling
+      symbol: str                  鈥?trading pair (e.g. "SOLUSDT-PERP")
+      timeframe: str               鈥?bar timeframe for subscription
+
+  run() -> None                    鈥?main polling loop (never raises)
+  stop() -> None                   鈥?graceful shutdown
+
+Registration Flow:
+  1. External system INSERTs into strategy_instances with status='pending'
+  2. RegistrationManager polls every POLL_SEC (5s)
+  3. On new 'pending' row: builds AlphaSignal(params) -> V2SignalAdapter -> StrategySlot
+  4. Calls registry.register(slot), updates DB to status='active'
+  5. Sends Telegram strategy_start notification
+
+Unregistration Flow:
+  1. External system UPDATEs status='stopping'
+  2. RegistrationManager detects change -> registry.unregister(strategy_id)
+  3. Updates DB to status='stopped'
+
+Restart Recovery:
+  On service restart, strategies with DB status='active' are re-registered
+  in memory (the _known dict is ephemeral).
+
+State Machine:
+  pending  --[_activate]--> active  --[_deactivate]--> stopped
+     |                         |
+     +----[error]--> error     +----[stopping]--> stopped
+
+Error Handling:
+  Activation failures set status='error' with error_message in DB.
+  The main poll loop catches all exceptions and continues (self-healing).
+
+Author:    nt-base system
+Version:   1.0.0
+"""
+from __future__ import annotations
 """RegistrationManager 鈥?dynamic strategy registration without restart.
 
 Polls the strategy_instances table for new/stopping entries.
@@ -8,7 +52,6 @@ Usage:
     asyncio.create_task(reg.run())
 """
 
-from __future__ import annotations
 
 import asyncio
 import json

@@ -1,5 +1,31 @@
-"""SignalStrategy protocol — interface between strategies and trading base."""
+"""
+Module:    base/signal_protocol
+Purpose:   Protocol definitions for the strategy execution framework.
+           Defines the SignalStrategy protocol, StrategySignal dataclass,
+           and BarSubscription data structure 鈥?the contract between
+           strategy implementations and the trading base.
+
+Interface:
+  SignalStrategy (Protocol)  鈥?strategy must implement:
+      strategy_id: str         unique identifier
+      subscriptions: list      bar subscriptions (symbol, timeframe, factors)
+      on_bar(dict) -> Signal   process bar, return trading signal
+      on_shutdown()            cleanup
+      get_diagnostics() -> dict monitoring data
+
+  StrategySignal (dataclass) 鈥?direction (1/-1/0) + reason (str)
+  BarSubscription (dataclass) 鈥?symbol, timeframe, factors list
+
+Design Decision:
+  Strategies are PURE signal generators. They do NOT hold state about
+  positions, orders, or account balances. That belongs to the base layer.
+  This separation enables independent testing and factor reuse.
+
+Author:    nt-base system
+Version:   1.0.0
+"""
 from __future__ import annotations
+"""SignalStrategy protocol — interface between strategies and trading base."""
 from dataclasses import dataclass
 from typing import Protocol
 

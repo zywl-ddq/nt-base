@@ -1,6 +1,19 @@
+"""
+Module:    shared/log
+Purpose:   Standardized logging setup. Provides setup_logging(name) -> Logger
+           with consistent format, level, and dual output (file + console).
+
+Interface: setup_logging(name: str) -> logging.Logger
+
+Output:    Logs to /root/nt-base/logs/{name}.log with rotation.
+           Format: ISO8601 timestamp [level] logger: message
+
+Author:    nt-base system
+Version:   1.0.0
+"""
+from __future__ import annotations
 """Standard logging setup. Call setup_logging(name) in every entrypoint."""
 
-from __future__ import annotations
 
 import logging
 import sys

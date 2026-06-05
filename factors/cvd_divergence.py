@@ -1,3 +1,33 @@
+"""
+Factor:    cvd_divergence
+Type:      Order-Flow
+Purpose:   Cumulative Volume Delta (CVD) vs price divergence detection.
+           Computes Z-score divergence between price and CVD over 60-bar window.
+
+Algorithm:
+  1. Compute delta = taker_buy_volume - taker_sell_volume per bar
+     (falls back to volume-based estimate if taker columns unavailable)
+  2. CVD = rolling sum of delta over WINDOW (60) bars
+  3. price_z = (close - rolling_mean) / rolling_std
+  4. cvd_z = (cvd - rolling_mean) / rolling_std
+  5. div_factor = price_z - cvd_z
+     Positive: price rising faster than CVD (potential reversal short)
+     Negative: price falling faster than CVD (potential reversal long)
+
+Parameters:
+  WINDOW = 60          lookback bars for rolling statistics
+  MAX_FFILL_GAP = 3    max NaN bars to forward-fill in delta
+
+Output: pd.Series of divergence values (higher = bullish divergence)
+
+Pre-conditions:
+  df must have 'delta' column (from tick aggregation) or 'taker_buy_volume'.
+  At least WINDOW bars required for valid Z-scores.
+
+Dependencies: numpy, pandas (from sandbox namespace)
+Author:    nt-base / trading-v2
+Version:   1.0.0
+"""
 """CVD Divergence Factor -- order-flow imbalance detection.
 
 Div_Factor = Price_Z - CVD_Z over a 60-bar rolling window.

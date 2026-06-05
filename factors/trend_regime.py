@@ -1,3 +1,29 @@
+"""
+Factor:    trend_regime
+Type:      Trend / Gate
+Purpose:   Absolute price trend direction via rolling linear regression
+           on 30-bar 1m closing prices. Returns -1/0/+1.
+
+Algorithm:
+  1. For each bar i >= 30, fit y = slope*x + intercept on closes[i-29:i+1]
+  2. Compute R-squared of the fit
+  3. If R2 >= 0.4 and mean(close) > 0: classify trend
+  4. Normalize slope by mean price, clip to [-1, 1], return sign
+
+Parameters:
+  WINDOW = 30          regression window (30 minutes)
+  R2_THRESHOLD = 0.4   minimum fit quality for valid signal
+
+Output: pd.Series of -1 (downtrend), 0 (ranging/noisy), +1 (uptrend)
+
+Use Case:
+  In SignalComposer, used as GATE factor to restrict allowed trade direction.
+  In single-factor mode, acts as both entry signal and directional bias.
+
+Dependencies: numpy, pandas (from sandbox namespace)
+Author:    nt-base / trading-v2
+Version:   1.0.0
+"""
 """Trend Regime Factor -- absolute price trend direction.
 
 Returns a Series of -1/0/+1 for each bar, computed via rolling linear

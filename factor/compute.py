@@ -1,3 +1,39 @@
+"""
+Module:    factor/compute
+Purpose:   Shared factor computation engine. Both backtest and live environments
+           call the SAME factor code on the SAME 1m bar data, guaranteeing
+           identical factor values regardless of execution context.
+
+Interface:
+  compute_factor_history(factor_code, df_1min) -> pd.Series
+      Batch compute factor over full 1m history. Used in backtests.
+
+  compute_factor_incremental(factor_code, df_full) -> float|None
+      Compute factor value for the latest bar only. Used in live trading.
+
+Factor Loading:
+  _load_factor_code(code: str) -> str
+      Accepts factor name (looks up in /root/nt-base/factors/) or raw code string.
+      Factor files must define a factor_* function or Series.
+
+Execution Model:
+  _execute_factor(code, df) -> pd.Series
+      1. Coerces numeric columns (handles Decimal from asyncpg)
+      2. Adds derived columns (delta, vol, depth placeholders)
+      3. exec() the factor code in a sandboxed namespace
+      4. Finds and calls factor_* function or extracts factor_* Series
+
+Sandbox:
+  Namespace includes: np, pd, scipy, builtins (safe subset).
+  No filesystem, network, or process access for factor code.
+
+Error Handling:
+  compute_factor_incremental returns None on failure (logged).
+  compute_factor_history raises on failure (batch mode, fail-fast).
+
+Author:    nt-base / trading-v2
+Version:   1.0.0
+"""
 """Shared factor computation for backtest and live environments.
 
 Both environments call the SAME factor code on the SAME 1min bar data,

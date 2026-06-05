@@ -1,3 +1,35 @@
+"""
+Factor:    residual_momentum
+Type:      Cross-Sectional
+Purpose:   SOL alpha vs BTC benchmark. Removes market (BTC) beta from SOL
+           returns to isolate idiosyncratic alpha via rolling OLS.
+
+Algorithm:
+  1. Resample 1m bars to 5m
+  2. Compute log returns for SOL and BTC
+  3. Rolling OLS: SOL_ret = alpha + beta * BTC_ret over ROLLING_BETA (288) bars
+  4. Residual = actual SOL_ret - predicted SOL_ret
+  5. Z-score residuals over Z_HISTORY (288) bars -> momentum signal
+
+Parameters:
+  ROLLING_BETA = 288   OLS window (~24h at 5m)
+  MOM_WINDOW = 24      momentum lookback
+  Z_HISTORY = 288      Z-score normalization window
+
+Output: pd.Series of residual momentum values
+
+Pre-conditions:
+  df must have 'btc_close' column (BTC 1m close prices joined to SOL bars).
+  At least ROLLING_BETA bars required for valid beta estimation.
+
+Edge Cases:
+  - Missing btc_close column: returns all-zero series
+  - Collinear BTC returns: lstsq may produce degenerate fit (handled by numpy)
+
+Dependencies: numpy, pandas (from sandbox namespace)
+Author:    nt-base / trading-v2
+Version:   1.0.0
+"""
 """Residual Momentum Factor -- SOL alpha vs BTC benchmark.
 
 Removes market (BTC) beta from SOL returns to isolate idiosyncratic alpha.

@@ -1,3 +1,46 @@
+"""
+Module:    base/v2_adapter
+Purpose:   Protocol adapter bridging nt-base SignalStrategy to trading-v2 AlphaSignal.
+           Translates bar_data dict interface to positional on_bar() call.
+
+Class: V2SignalAdapter
+  __init__(alpha_signal, strategy_id, symbol, timeframe)
+      alpha_signal: AlphaSignal   鈥?trading-v2 signal generator
+      strategy_id: str            鈥?unique strategy identifier
+      symbol: str                 鈥?trading pair
+      timeframe: str              鈥?bar timeframe for subscription
+
+  Implements nt-base SignalStrategy protocol:
+      strategy_id    -> returns the configured ID
+      subscriptions  -> BarSubscription list from factor_names
+      on_bar(dict)   -> extracts close/high/low/ts_ns/factors,
+                        pushes factors via set_factor_value(),
+                        calls alpha_signal.on_bar(close, high, ...)
+      on_shutdown()  -> delegates to alpha_signal
+      get_diagnostics() -> delegates to alpha_signal
+
+Protocol Translation:
+  nt-base bar_data dict keys:
+      "close", "high", "low"  -> direct float conversion
+      "ts_ns"                 -> passes through
+      "factors"               -> dict of {name: value}, pushed before on_bar
+      "btc_close" (optional)  -> defaults to close if missing
+      "delta_buy"/"delta_sell" -> defaults to 0.0 if missing
+
+  trading-v2 AlphaSignal.on_bar(close, high, low,
+                                 delta_buy_vol, delta_sell_vol,
+                                 btc_close, ts_ns) -> StrategySignal
+
+Design Decision:
+  The adapter owns factor value pushing. This ensures nt-base's factor
+  computation is decoupled from AlphaSignal's factor consumption.
+  AlphaSignal.on_bar() sees factor values from bar_data['factors']
+  as if they were pushed by a backtest or live factor loop.
+
+Author:    nt-base system
+Version:   1.0.0
+"""
+from __future__ import annotations
 """V2SignalAdapter 鈥?wraps trading-v2 AlphaSignal in nt-base's SignalStrategy.
 
 Bridges the protocol gap:
@@ -6,7 +49,6 @@ Bridges the protocol gap:
 
 Strategy code (AlphaSignal) remains pure 鈥?no DB, no NT, no I/O.
 """
-from __future__ import annotations
 from base.signal_protocol import SignalStrategy, StrategySignal, BarSubscription
 
 

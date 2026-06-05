@@ -1,9 +1,54 @@
+"""
+Module:    base/v2_signal
+Purpose:   Pure multi-factor alpha signal strategy 鈥?no NautilusTrader dependencies.
+           Uses SignalComposer for entry and ExitManager for position management.
+
+Class: AlphaSignal (implements SignalStrategy protocol from trading-v2)
+  __init__(gate_factor, factor_1..5, direction_1..5, weight_1..5,
+           signal_threshold, atr_period, btc_shock_long/short,
+           time_limit_long/short, max_hold_minutes,
+           breakeven_atr_mult, trail_trigger_atr, trail_stop_atr)
+      All parameters fully configurable for RD-Agent optimization.
+
+  on_bar(close, high, low, delta_buy_vol, delta_sell_vol, btc_close, ts_ns) -> StrategySignal
+      Main inference method. Called on each 1m bar.
+      - Updates rolling buffers (SOL closes/highs/lows, BTC closes, tick deltas)
+      - If in position: evaluates ExitManager (4 layers) + signal flip exit
+      - If not in position: evaluates SignalComposer.direction() -> entry signal
+
+  set_factor_value(name, ts_ns, value)
+      Push pre-computed factor value into SignalComposer.
+
+  get_diagnostics() -> dict
+      Returns {bar_count, in_position, side, entry_price, bars_held,
+               composite, regime, direction} for monitoring.
+
+Data Flow:
+  1. nt-base computes factors from bar buffer -> bar_data['factors']
+  2. V2SignalAdapter pushes factors + calls on_bar()
+  3. AlphaSignal.on_bar() updates buffers
+  4. SignalComposer ranks factors, computes composite, applies EMA + gate
+  5. ExitManager evaluates 4-layer exit if in position
+  6. Returns StrategySignal(direction, reason)
+
+Bug History:
+  v1.0: regime variable defined inside if-block, referenced in entry path
+        -> UnboundLocalError crash every 6 min. Fixed: moved before branch.
+
+Invariants:
+  - sol_1m_closes always has >= 1 entry after first bar
+  - exit_state.is_long must match _position_side when in position
+  - _in_position implies _position_side in ("LONG", "SHORT")
+
+Author:    nt-base / trading-v2
+Version:   1.1.0 (regime fix)
+"""
+from __future__ import annotations
 """AlphaSignal — pure signal strategy, no NautilusTrader dependencies.
 
 Implements SignalStrategy protocol. Uses SignalComposer for entry,
 ExitManager for exits (both pure logic, tested independently).
 """
-from __future__ import annotations
 
 from collections import deque
 

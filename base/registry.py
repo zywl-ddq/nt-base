@@ -1,5 +1,31 @@
-"""StrategyRegistry — manages strategy slots and factor subscriptions."""
+"""
+Module:    base/registry
+Purpose:   Central strategy registry managing StrategySlot lifecycle.
+           Maintains slot index and factor-subscription index for efficient
+           bar dispatch lookups.
+
+Interface: StrategyRegistry
+  register(slot)              鈥?add strategy, update factor index
+  unregister(strategy_id)     鈥?remove strategy, clean factor index
+  get_slots(symbol, tf)       鈥?find slots subscribed to a specific bar type
+  all_slots()                 鈥?all registered slots
+  get_active_slots()          鈥?slots currently in a position
+  active_factors()            鈥?set of factor names needed by all strategies
+  summary()                   鈥?diagnostic snapshot
+
+Performance:
+  get_slots() is called on every 1m bar 鈥?O(n) where n = registered strategies.
+  Factor index avoids computing unused factors.
+
+Thread Safety:
+  All mutations (register/unregister) happen in the async main thread.
+  Read operations are safe for concurrent access from the bar dispatch loop.
+
+Author:    nt-base system
+Version:   1.0.0
+"""
 from __future__ import annotations
+"""StrategyRegistry — manages strategy slots and factor subscriptions."""
 from base.slot import StrategySlot
 from base.signal_protocol import BarSubscription
 

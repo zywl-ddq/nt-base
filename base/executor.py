@@ -1,5 +1,45 @@
-'''OrderExecutor with Telegram notifications.'''
+"""
+Module:    base/executor
+Purpose:   Order execution engine. Translates StrategySignals into NautilusTrader
+           market orders with position sizing, risk gating, and Telegram notifications.
+
+Class: OrderExecutor
+  __init__(sol_id, venue, portfolio, submit_order, cache)
+      sol_id: InstrumentId       鈥?trading instrument (SOLUSDT-PERP)
+      venue: Venue               鈥?exchange venue (BINANCE)
+      portfolio: Portfolio       鈥?NT portfolio for equity queries
+      submit_order: callable     鈥?Strategy.submit_order bound method
+      cache: Cache               鈥?NT cache for instrument/position queries
+
+  execute(slot, signal, price) -> str
+      Main entry: checks risk gates (tripped, cooldown), evaluates position
+      state, routes to _open or flat. Returns result status string.
+
+  _open(side, price, slot, reason)
+      Computes position size from equity * position_size_pct * leverage,
+      creates IOC market order, submits, updates slot state, sends Telegram.
+
+  flat(slot, reason)
+      Closes current position with IOC market order. Computes realized PnL
+      approximation, sends Telegram close notification with PnL and hold time.
+
+  flat_all(slots, reason)
+      Emergency close-all. Called on strategy stop or daily loss trip.
+
+Security Notes:
+  - Order quantity derived from account equity (not fixed), preventing over-leverage.
+  - IOC (Immediate-Or-Cancel) prevents partial fills from dangling.
+  - Telegram notifications are fire-and-forget (asyncio.ensure_future).
+
+Telegram Integration:
+  Each slot has independent telegram_bot_token and telegram_chat_id.
+  Notifications on: entry, exit (with PnL), reverse.
+
+Author:    nt-base system
+Version:   1.1.0
+"""
 from __future__ import annotations
+'''OrderExecutor with Telegram notifications.'''
 import asyncio
 import time
 import logging

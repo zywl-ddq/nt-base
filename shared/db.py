@@ -1,6 +1,17 @@
+"""
+Module:    shared/db
+Purpose:   Database connection pool management for TimescaleDB.
+           Provides singleton pool lifecycle (create/close) shared across all modules.
+Interface: get_pool() -> asyncpg.Pool
+           close_pool() -> None
+Dependencies: asyncpg, shared.env
+Author:    nt-base system
+Version:   1.0.0
+Security:  Pool credentials sourced from environment (cfg.timescale.dsn), never hardcoded.
+"""
+from __future__ import annotations
 """Shared asyncpg connection pool. Single import point for all components."""
 
-from __future__ import annotations
 
 import asyncio
 import logging

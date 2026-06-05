@@ -1,3 +1,41 @@
+"""
+Module:    base/data_manage
+Purpose:   Sole data subscription owner and TimescaleDB persistence layer.
+           Subscribes to ALL bar types (1s/5s/1m), ticks, orderbook, funding
+           via the NautilusTrader DataEngine. Batch-writes market data to DB.
+
+Class: DataManageActor (extends NT Actor)
+  Responsibilities:
+    1. Bar subscription (1s/5s INTERNAL, 1m INTERNAL aggregated from ticks)
+    2. Trade tick reception and CVD delta computation
+    3. OrderBook delta subscription (L2 snapshot every 1s)
+    4. Open Interest polling (every 30s)
+    5. Batch persistence to TimescaleDB (bars, ticks, funding, L2, OI)
+    6. Publish bars to msgbus for passive strategy consumption
+
+  Config: DataManageConfig
+    instrument_ids: tuple[str]     trading instruments
+    bar_timeframes: tuple[str]     bar aggregation periods
+    flush_interval_sec: float      DB write batch interval
+    max_buffer: int                max buffered bars before forced flush
+
+Architecture Note:
+  This Actor is the SINGLE active subscriber for all bar types.
+  Strategies listen PASSIVELY on the MessageBus 鈥?no subscriber conflicts.
+  The monkey-patched on_bar in main.py intercepts bar delivery for
+  factor computation and strategy signal dispatch.
+
+Bar Source:
+  v1.0: Used EXTERNAL for minute+ bars (Binance REST), but testnet has no REST client.
+  v1.1: All bars use INTERNAL aggregation from WebSocket trade ticks (fixed).
+
+Bar Type Labels:
+  _bar_tf_label(bar_type) -> "1s", "5s", "1m" 鈥?DB-friendly timeframe strings
+
+Author:    nt-base system
+Version:   1.1.0 (INTERNAL bar source fix)
+"""
+from __future__ import annotations
 """DataManageActor — sole data subscription owner + TimescaleDB persistence.
 
 Subscribes to ALL bar types (1s/5s/1m), ticks, orderbook, funding via the
@@ -7,7 +45,6 @@ This is the SINGLE active data subscriber. Strategies listen passively
 on the MessageBus for the bar topics this Actor publishes to.
 """
 
-from __future__ import annotations
 
 import asyncio
 import json

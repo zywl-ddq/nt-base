@@ -1,5 +1,41 @@
-"""nt-base — trading base service entrypoint."""
+"""
+Module:    main (nt-base entrypoint)
+Purpose:   Trading Base Service 鈥?the persistent runtime hosting dynamic
+           trading strategies. Connects to Binance Futures testnet,
+           manages data subscriptions, factor computation, bar dispatch,
+           and dynamic strategy registration.
+
+Execution Flow:
+  1. assert_required()         鈥?validate environment secrets
+  2. get_pool()                鈥?connect to TimescaleDB
+  3. build_trading_node()      鈥?create NT TradingNode (sandbox)
+  4. DataManageActor           鈥?subscribe bars/ticks/L2/OI + persist to DB
+  5. BaseStrategy(NT)          鈥?owns OrderExecutor + RiskLoop
+  6. RegistrationManager       鈥?polls strategy_instances, hot-registers strategies
+  7. Bar dispatch monkey-patch 鈥?intercepts dm_actor.on_bar for factor computation
+                                 and strategy signal dispatch
+
+Bar Dispatch (monkey-patched dm_actor.on_bar):
+  Every bar (1s/5s/1m) -> update price -> buffer OHLC
+  Every 1m bar -> compute factors -> dispatch to registered strategy slots
+  Signal != 0 -> OrderExecutor.execute(slot, signal, price)
+
+Dynamic Registration:
+  RegistrationManager polls strategy_instances table every 5s.
+  New 'pending' entries are hot-activated without restart.
+  DB schema: CREATE TABLE strategy_instances (instance_id, params, ...)
+
+Shutdown:
+  SIGTERM -> flat_all positions -> deregister strategies -> close DB pool
+
+Logging:
+  Dual output: systemd journal (via stdout) + /root/nt-base/logs/nt_base.log
+
+Author:    nt-base system
+Version:   2.0.0 (dynamic registration)
+"""
 from __future__ import annotations
+"""nt-base — trading base service entrypoint."""
 import asyncio, sys, signal, logging
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
