@@ -59,7 +59,6 @@ from nautilus_trader.model.data import Bar, BarType, TradeTick
 from nautilus_trader.model.events import (
     OrderEvent,
     OrderFilled,
-    PositionChanged,
     PositionClosed,
     PositionEvent,
     PositionOpened,
@@ -199,7 +198,6 @@ class DataManageActor(Actor):
                 src = "INTERNAL"  # all bars aggregated from trade ticks
                 bt_str = f"{s}-{tf_u}-LAST-{src}"
                 bt = BarType.from_str(bt_str)
-                topic = f"data.bars.{bt}"
                 try:
                     self.subscribe_bars(bt)
                     self.log.info(f"subscribed to bars: {bt}")
@@ -749,7 +747,7 @@ class DataManageActor(Actor):
     async def _oi_poll_loop(self) -> None:
         self.log.info(f"OI polling starting (every {self._cfg.oi_poll_interval_sec}s)")
         try:
-            import urllib.request, json
+            import urllib.request
             while self._running:
                 try:
                     await asyncio.sleep(self._cfg.oi_poll_interval_sec)

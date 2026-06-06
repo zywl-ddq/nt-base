@@ -36,13 +36,14 @@ from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import TraderId
 
 SYMBOL = "SOLUSDT-PERP.BINANCE"
+BTC_SYMBOL = "BTCUSDT-PERP.BINANCE"
 VENUE = "BINANCE"
 
 
 def build_trading_node(api_key: str, api_secret: str,
                        leverage: int = 2, initial_usdt: int = 1000) -> TradingNode:
     instr_provider = InstrumentProviderConfig(
-        load_all=False, load_ids=frozenset([SYMBOL]),
+        load_all=False, load_ids=frozenset([SYMBOL, BTC_SYMBOL]),
     )
     node_cfg = TradingNodeConfig(
         trader_id=TraderId("NT-BASE-001"),

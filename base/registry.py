@@ -27,7 +27,6 @@ Version:   1.0.0
 from __future__ import annotations
 """StrategyRegistry — manages strategy slots and factor subscriptions."""
 from base.slot import StrategySlot
-from base.signal_protocol import BarSubscription
 
 
 class StrategyRegistry:

@@ -49,7 +49,7 @@ Bridges the protocol gap:
 
 Strategy code (AlphaSignal) remains pure 鈥?no DB, no NT, no I/O.
 """
-from base.signal_protocol import SignalStrategy, StrategySignal, BarSubscription
+from base.signal_protocol import StrategySignal, BarSubscription
 
 
 class V2SignalAdapter:

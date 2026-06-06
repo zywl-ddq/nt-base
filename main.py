@@ -36,7 +36,9 @@ Version:   2.0.0 (dynamic registration)
 """
 from __future__ import annotations
 """nt-base — trading base service entrypoint."""
-import asyncio, sys, signal, logging
+import asyncio
+import sys
+import signal
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -75,6 +77,7 @@ class BaseStrategy(Strategy):
             portfolio=self.portfolio,
             submit_order=self.submit_order,
             cache=self.cache,
+            order_factory=self.order_factory,
         )
         self._risk_loop = RiskLoop(self._registry, self._executor)
         asyncio.create_task(self._risk_loop.start())
@@ -103,6 +106,11 @@ async def main():
     assert_required()
     pool = await get_pool()
 
+    # Pre-fill bar buffer from historical tick data (avoids cold-start wait)
+    from prefill_bar_buffer import prefill_bar_buffer
+    _bar_buffer, _latest_btc_close = await prefill_bar_buffer(pool, 300)
+    logger.info(f"Buffer pre-filled: {len(_bar_buffer)} bars, latest_btc={_latest_btc_close:.2f}")
+
     node = build_trading_node(
         api_key=cfg.binance.api_key,
         api_secret=cfg.binance.api_secret,
@@ -110,9 +118,10 @@ async def main():
         initial_usdt=int(cfg.sandbox_initial_usdt),
     )
 
-    # DataManageActor for Binance WS + persistence
+    BTC_SYMBOL = f"BTCUSDT-PERP.{VENUE_NAME}"
+
     dm_config = DataManageConfig(
-        instrument_ids=(SYMBOL,),
+        instrument_ids=(SYMBOL, BTC_SYMBOL),
         bar_timeframes=("1-SECOND", "5-SECOND", "1-MINUTE"),
     )
     node.trader.add_actor(DataManageActor(dm_config))
@@ -151,29 +160,66 @@ async def main():
 
     logger.info(f"dm_actor lookup: found={dm_actor is not None}, actors_count={len(actors_container) if hasattr(actors_container, '__len__') else '?'}")
 
-    # Factor computation buffer
     from collections import deque
-    _bar_buffer: deque[dict] = deque(maxlen=300)
+    # _bar_buffer initialized via prefill_bar_buffer() above
+    _running_buyer_vol: float = 0.0
+    _running_seller_vol: float = 0.0
+    # _latest_btc_close initialized via prefill above
 
     if dm_actor:
         _original_on_bar = dm_actor.on_bar
+        _original_on_trade_tick = dm_actor.on_trade_tick
+
+        def _on_trade_tick_with_accum(tick):
+            _original_on_trade_tick(tick)
+            nonlocal _running_buyer_vol, _running_seller_vol
+            size = float(tick.size)
+            if tick.aggressor_side.name == "BUYER":
+                _running_buyer_vol += size
+            else:
+                _running_seller_vol += size
+
+        dm_actor.on_trade_tick = _on_trade_tick_with_accum
 
         def _on_bar_with_dispatch(bar):
             _original_on_bar(bar)
             iid = str(bar.bar_type.instrument_id)
             base_strat.update_price(iid, float(bar.close))
 
-            # Buffer all bars for factor computation
+            if "BTCUSDT" in iid:
+                if "1-MINUTE" in str(bar.bar_type.spec):
+                    nonlocal _latest_btc_close
+                    _latest_btc_close = float(bar.close)
+                return
+
+            if "1-MINUTE" not in str(bar.bar_type.spec):
+                return
+
+            # Snapshot accumulated tick volumes for this bar, then reset
+            nonlocal _running_buyer_vol, _running_seller_vol
+            buyer_vol = _running_buyer_vol
+            seller_vol = _running_seller_vol
+            _running_buyer_vol = 0.0
+            _running_seller_vol = 0.0
+            delta = buyer_vol - seller_vol
+            volume = buyer_vol + seller_vol
+
+            if len(_bar_buffer) % 5 == 0:
+                logger.info(f"bar_buffer stats: len={len(_bar_buffer)} volume={volume:.2f} delta={delta:.2f} btc_close={'%.2f' % _latest_btc_close if _latest_btc_close > 0 else 'pending'}")
+
+            # Buffer only 1-minute bars for factor computation
             _bar_buffer.append({
                 "ts": bar.ts_event,
                 "open": float(bar.open),
                 "high": float(bar.high),
                 "low": float(bar.low),
                 "close": float(bar.close),
+                "volume": volume,
+                "delta": delta,
+                "taker_buy_volume": buyer_vol,
+                "taker_sell_volume": seller_vol,
+                "btc_close": _latest_btc_close if _latest_btc_close > 0 else None,
             })
-
-            if "1-MINUTE" not in str(bar.bar_type.spec):
-                return
 
             slots = registry.get_slots("SOLUSDT-PERP", "1m")
             executor = base_strat.get_executor()
@@ -188,8 +234,6 @@ async def main():
                 df = pd.DataFrame(list(_bar_buffer))
                 df["ts"] = pd.to_datetime(df["ts"])
                 df = df.set_index("ts")
-                df["volume"] = 0.0
-                df["delta"] = 0.0
 
                 from factor.compute import compute_factor_history
                 for fname in active:
@@ -197,8 +241,10 @@ async def main():
                         series = compute_factor_history(fname, df)
                         val = series.dropna().iloc[-1] if len(series.dropna()) > 0 else 0.0
                         factors[fname] = float(val)
-                    except Exception:
+                    except Exception as e:
+                        logger.warning(f"factor {fname} failed: {e}")
                         factors[fname] = 0.0
+                logger.info(f"factors computed: {factors}")
 
             for slot in slots:
                 bar_data = {
@@ -209,9 +255,12 @@ async def main():
                     "factors": factors,
                 }
                 signal = slot.strategy.on_bar(bar_data)
-                if signal and signal.direction != 0:
-                    result = executor.execute(slot, signal, float(bar.close))
-                    logger.info(f"Signal: {slot.strategy_id} {signal.direction} -> {result}")
+                if signal is not None:
+                    if signal.direction != 0:
+                        result = executor.execute(slot, signal, float(bar.close))
+                    else:
+                        result = str(executor.flat(slot, signal.reason))
+                    logger.info(f"Signal: {slot.strategy_id} dir={signal.direction} reason={signal.reason} result={result}")
 
         dm_actor.on_bar = _on_bar_with_dispatch
         logger.info("Bar dispatch wired: DataManageActor -> factors -> strategies -> executor")

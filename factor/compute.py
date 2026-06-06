@@ -93,7 +93,6 @@ def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
 
 def _add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Add derived columns so factor code can reference them."""
-    import numpy as np
     close = df["close"].astype(float)
 
     for col in ["bid_ask_spread_avg", "order_book_imbalance"]:
@@ -105,14 +104,17 @@ def _add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
                  "liquidation_imbalance", "large_trade_ratio"]:
         if col not in df: df[col] = 0.0
     if "long_short_ratio" not in df: df["long_short_ratio"] = 1.0
-    if "taker_buy_volume" not in df: df["taker_buy_volume"] = df.get("volume", 0) * 0.5
-    if "taker_sell_volume" not in df: df["taker_sell_volume"] = df.get("volume", 0) * 0.5
+    if "volume" not in df: df["volume"] = 0.0
+    if "taker_buy_volume" not in df: df["taker_buy_volume"] = df["volume"] * 0.5
+    if "taker_sell_volume" not in df: df["taker_sell_volume"] = df["volume"] * 0.5
+    if "delta" not in df: df["delta"] = df["taker_buy_volume"] - df["taker_sell_volume"]
     if "buy_sell_pressure_ratio" not in df: df["buy_sell_pressure_ratio"] = 1.0
-    if "avg_trade_size" not in df: df["avg_trade_size"] = df.get("volume", 0) / (df.get("trade_count", 1) + 1)
+    if "avg_trade_size" not in df: df["avg_trade_size"] = df["volume"] / (df.get("trade_count", 1) + 1)
     if "realized_vol_5m" not in df: df["realized_vol_5m"] = close.pct_change().rolling(5).std().fillna(0)
     if "realized_vol_1h" not in df: df["realized_vol_1h"] = close.pct_change().rolling(60).std().fillna(0)
     if "trend_strength_1h" not in df:
         df["trend_strength_1h"] = close.diff(60).fillna(0) / (close.shift(60).fillna(close.iloc[0]) + 1e-9)
+    if "btc_close" not in df: df["btc_close"] = np.nan
     return df
 
 

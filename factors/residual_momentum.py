@@ -12,9 +12,9 @@ Algorithm:
   5. Z-score residuals over Z_HISTORY (288) bars -> momentum signal
 
 Parameters:
-  ROLLING_BETA = 288   OLS window (~24h at 5m)
-  MOM_WINDOW = 24      momentum lookback
-  Z_HISTORY = 288      Z-score normalization window
+  ROLLING_BETA = 60   OLS window (~24h at 5m)
+  MOM_WINDOW = 12      momentum lookback
+  Z_HISTORY = 60      Z-score normalization window
 
 Output: pd.Series of residual momentum values
 
@@ -41,9 +41,9 @@ Works on 5m bars. Requires btc_close column in df.
 import numpy as np
 import pandas as pd
 
-ROLLING_BETA = 288
-MOM_WINDOW = 24
-Z_HISTORY = 288
+ROLLING_BETA = 60
+MOM_WINDOW = 12
+Z_HISTORY = 60
 
 
 def factor_residual_momentum(df, timescale="5min"):

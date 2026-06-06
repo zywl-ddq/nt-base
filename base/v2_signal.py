@@ -52,7 +52,6 @@ ExitManager for exits (both pure logic, tested independently).
 
 from collections import deque
 
-import numpy as np
 
 from base.signal_protocol import SignalStrategy, StrategySignal
 from strategy.signal import build_signal_composer

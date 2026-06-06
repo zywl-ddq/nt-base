@@ -52,7 +52,6 @@ def _load_env_file(path: Path) -> None:
             continue
         k, v = line.split("=", 1)
         k = k.strip()
-        v_raw = v
         v = v.lstrip()
         # strip inline comments unless quoted; we only support unquoted values here
         if not (v.startswith('"') or v.startswith("'")):

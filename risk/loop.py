@@ -33,7 +33,8 @@ Version:   1.1.0
 """
 from __future__ import annotations
 '''Risk loop with Telegram notifications.'''
-import asyncio, logging
+import asyncio
+import logging
 from risk.checker import check_stop, check_take, check_hold, check_daily
 from base.notify import send_message, fmt_risk_exit, fmt_daily_trip
 

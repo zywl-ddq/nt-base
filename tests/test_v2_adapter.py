@@ -12,7 +12,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from base.v2_adapter import V2SignalAdapter
 from base.v2_signal import AlphaSignal
-from base.signal_protocol import StrategySignal, BarSubscription
 
 
 def test_adapter_pushes_factors_before_on_bar():

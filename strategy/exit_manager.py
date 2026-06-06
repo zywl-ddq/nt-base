@@ -54,7 +54,7 @@ Layers:
   L4 — ATR Trailing: profit > trigger -> trail stop at HH/LL
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -121,8 +121,8 @@ class ExitManager:
         if n < 3:
             return 0.0
         h = np.array(highs[-n:], dtype=float)
-        l = np.array(lows[-n:], dtype=float)
-        tr = h - l
+        low_vals = np.array(lows[-n:], dtype=float)
+        tr = h - low_vals
         return float(np.mean(tr))
 
     def evaluate(
@@ -137,7 +137,7 @@ class ExitManager:
         """Evaluate all 4 layers. Returns ExitAction to close, or None to hold."""
 
         # When trending, suppress CVD reversal (microstructure noise)
-        skip_cvd = (regime == 0)
+        skip_cvd = (regime != 0)
 
         # Update state tracking
         state.bars_held += 1

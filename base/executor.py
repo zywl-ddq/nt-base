@@ -46,7 +46,7 @@ import logging
 from base.slot import StrategySlot
 from base.signal_protocol import StrategySignal
 from base.notify import (
-    send_message, fmt_entry, fmt_close, fmt_reverse,
+    send_message, fmt_entry, fmt_close,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,12 +60,13 @@ def _notify(slot: StrategySlot, text: str):
 
 
 class OrderExecutor:
-    def __init__(self, sol_id, venue, portfolio, submit_order, cache):
+    def __init__(self, sol_id, venue, portfolio, submit_order, cache, order_factory=None):
         self._sol_id = sol_id
         self._venue = venue
         self._portfolio = portfolio
         self._submit_order = submit_order
         self._cache = cache
+        self._order_factory = order_factory
 
     def execute(self, slot: StrategySlot, signal: StrategySignal,
                 current_price: float) -> str:
@@ -92,6 +93,12 @@ class OrderExecutor:
             return f"entry {slot.entry_side}"
 
     def _create_market_order(self, instrument_id, order_side, quantity, time_in_force):
+        if self._order_factory is not None:
+            return self._order_factory.market(
+                instrument_id=instrument_id,
+                order_side=order_side,
+                quantity=quantity,
+            )
         return self._cache.instrument(instrument_id).create_order(
             order_side=order_side,
             quantity=quantity,

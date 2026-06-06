@@ -12,7 +12,7 @@ Algorithm:
 
 Parameters:
   WINDOW = 30          regression window (30 minutes)
-  R2_THRESHOLD = 0.4   minimum fit quality for valid signal
+  R2_THRESHOLD = 0.15   minimum fit quality for valid signal
 
 Output: pd.Series of -1 (downtrend), 0 (ranging/noisy), +1 (uptrend)
 
@@ -32,7 +32,7 @@ regression on 30-bar 1m closing prices.
 import numpy as np
 import pandas as pd
 WINDOW = 30
-R2_THRESHOLD = 0.4
+R2_THRESHOLD = 0.15
 
 
 def factor_trend_regime(df, timescale="1min"):

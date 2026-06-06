@@ -61,7 +61,8 @@ def check_take(slot: StrategySlot, current_price: float) -> RiskAction:
     return RiskAction("none")
 
 
-def check_hold(slot: StrategySlot) -> RiskAction:
+def check_hold(slot: StrategySlot, current_price: float = 0.0) -> RiskAction:
+    # current_price is unused but required for dynamic signature matching in risk loops
     if not slot.has_position:
         return RiskAction("none")
     if slot.held_sec >= slot.max_hold_sec:
