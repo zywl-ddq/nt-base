@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from base.v2_signal import AlphaSignal
+from strategy.alpha_signal_v3 import AlphaSignal
 
 
 def test_entry_from_flat_does_not_crash():

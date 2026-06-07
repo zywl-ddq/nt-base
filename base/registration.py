@@ -9,7 +9,7 @@ import asyncpg
 
 from base.slot import StrategySlot
 from base.v2_adapter import V2SignalAdapter
-from base.v2_signal import AlphaSignal
+from strategy.alpha_signal_v3 import AlphaSignal
 from base.notify import send_message, fmt_strategy_start
 
 logger = logging.getLogger(__name__)

@@ -71,7 +71,7 @@ async def main():
         return
 
     # Build the strategy slot
-    from base.v2_signal import AlphaSignal
+    from strategy.alpha_signal_v3 import AlphaSignal
     from base.v2_adapter import V2SignalAdapter
     from base.slot import StrategySlot
 

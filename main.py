@@ -40,6 +40,7 @@ import asyncio
 import sys
 import signal
 from pathlib import Path
+sys.path.insert(0, "/root/trading-v2")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from shared.env import cfg, assert_required

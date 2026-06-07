@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from base.v2_adapter import V2SignalAdapter
-from base.v2_signal import AlphaSignal
+from strategy.alpha_signal_v3 import AlphaSignal
 
 
 def test_adapter_pushes_factors_before_on_bar():
