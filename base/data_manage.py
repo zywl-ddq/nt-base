@@ -81,6 +81,7 @@ class DataManageConfig(ActorConfig, frozen=True):
     """
 
     instrument_ids: tuple[str, ...]
+    tick_instrument_ids: tuple[str, ...] | None = None
     bar_timeframes: tuple[str, ...] = ("1-SECOND", "5-SECOND", "1-MINUTE")
     flush_interval_sec: float = 5.0
     max_buffer: int = 1000
@@ -171,7 +172,8 @@ class DataManageActor(Actor):
         # Subscribe to TICKS via the standard API — ticks have no aggregator
         # contention with strategies (each subscriber gets independent
         # dispatch) so this is safe.
-        for s in self._cfg.instrument_ids:
+        tick_ids = self._cfg.tick_instrument_ids or self._cfg.instrument_ids
+        for s in tick_ids:
             iid = InstrumentId.from_str(s)
             self.subscribe_trade_ticks(iid)
 

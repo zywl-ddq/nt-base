@@ -1,46 +1,16 @@
 """
 Module:    factor/compute
 Purpose:   Shared factor computation engine. Both backtest and live environments
-           call the SAME factor code on the SAME 1m bar data, guaranteeing
-           identical factor values regardless of execution context.
+           call the SAME factor code on the SAME 1m bar data.
 
-Interface:
-  compute_factor_history(factor_code, df_1min) -> pd.Series
-      Batch compute factor over full 1m history. Used in backtests.
-
-  compute_factor_incremental(factor_code, df_full) -> float|None
-      Compute factor value for the latest bar only. Used in live trading.
-
-Factor Loading:
-  _load_factor_code(code: str) -> str
-      Accepts factor name (looks up in /root/nt-base/factors/) or raw code string.
-      Factor files must define a factor_* function or Series.
-
-Execution Model:
-  _execute_factor(code, df) -> pd.Series
-      1. Coerces numeric columns (handles Decimal from asyncpg)
-      2. Adds derived columns (delta, vol, depth placeholders)
-      3. exec() the factor code in a sandboxed namespace
-      4. Finds and calls factor_* function or extracts factor_* Series
-
-Sandbox:
-  Namespace includes: np, pd, scipy, builtins (safe subset).
-  No filesystem, network, or process access for factor code.
-
-Error Handling:
-  compute_factor_incremental returns None on failure (logged).
-  compute_factor_history raises on failure (batch mode, fail-fast).
-
-Author:    nt-base / trading-v2
-Version:   1.0.0
-"""
-"""Shared factor computation for backtest and live environments.
-
-Both environments call the SAME factor code on the SAME 1min bar data,
-guaranteeing identical factor values regardless of execution context.
+Updates v1.1:
+  - compute_factor_history: supports multi-column factor output (DataFrame).
+    When a factor returns a DataFrame, each column becomes a separate factor:
+      trend_regime -> {trend_regime: direction_val, trend_confidence: conf_val}
+  - Backward compatible: factors returning a single Series work as before.
 """
 import logging
-
+import inspect
 import numpy as np
 import scipy
 import pandas as pd
@@ -61,11 +31,8 @@ _FACTOR_NAMESPACE_BASE = {"scipy": scipy, "pd": pd, "np": np, "__builtins__": __
 
 
 def _load_factor_code(code: str) -> str:
-    """Accepts either a factor name (looks up in factors dir) or raw code string."""
     from pathlib import Path
-    for factors_dir in (
-        Path("/root/nt-base/factors"),
-    ):
+    for factors_dir in (Path("/root/nt-base/factors"),):
         candidate = factors_dir / f"{code}.py"
         if candidate.exists():
             return candidate.read_text()
@@ -73,11 +40,6 @@ def _load_factor_code(code: str) -> str:
 
 
 def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert numeric columns to float64 so factor math works correctly.
-
-    Handles Decimal (from asyncpg) and integer columns that would otherwise
-    cause type errors in mixed arithmetic with numpy floats.
-    """
     import decimal
     _DECIMAL = decimal.Decimal
     for col in df.columns:
@@ -92,9 +54,7 @@ def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Add derived columns so factor code can reference them."""
     close = df["close"].astype(float)
-
     for col in ["bid_ask_spread_avg", "order_book_imbalance"]:
         if col not in df: df[col] = 0.0
     if "bid_depth_weighted" not in df: df["bid_depth_weighted"] = close * 0.999
@@ -118,21 +78,12 @@ def _add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _execute_factor(code: str, df: pd.DataFrame) -> pd.Series:
-    """Execute a single factor code string against a DataFrame.
-
-    Supports two patterns:
-    1. The code defines a ``factor_*`` function that accepts ``df`` (and optionally
-       ``timescale``) and returns a ``pd.Series``.
-    2. The code directly produces a ``pd.Series`` whose variable name starts
-       with ``factor_*``.
-    """
+def _execute_factor(code: str, df: pd.DataFrame) -> pd.Series | pd.DataFrame:
     df_enriched = _add_derived_columns(_coerce_numeric(df.copy()))
     namespace = {**_FACTOR_NAMESPACE_BASE, "df": df_enriched}
     exec(code, namespace)
 
     # Pattern 1: callable functions named factor_*
-    import inspect
     for name, obj in namespace.items():
         if callable(obj) and name.startswith("factor_"):
             try:
@@ -143,55 +94,56 @@ def _execute_factor(code: str, df: pd.DataFrame) -> pd.Series:
                     result = obj(df=namespace["df"])
             except ValueError:
                 result = obj(df=namespace["df"])
+
+            if isinstance(result, pd.DataFrame):
+                return result
             if isinstance(result, pd.Series):
                 return pd.to_numeric(result, errors="coerce")
 
-    # Pattern 2: already-computed Series named factor_*
+    # Pattern 2: already-computed Series/DataFrame named factor_*
     for name, obj in namespace.items():
-        if isinstance(obj, pd.Series) and name.startswith("factor_"):
-            return pd.to_numeric(obj, errors="coerce")
+        if name.startswith("factor_"):
+            if isinstance(obj, (pd.Series, pd.DataFrame)):
+                return obj
 
-    raise ValueError("No factor_* Series found in factor code namespace")
+    raise ValueError("No factor_* Series/DataFrame found in factor code namespace")
 
 
-def compute_factor_history(
-    factor_code: str,
-    df_1min: pd.DataFrame,
-) -> pd.Series:
-    """Batch compute factor over full 1min history.
-
-    Args:
-        factor_code: Factor name (e.g. 'factor_cross_auto_corr') or raw Python code.
-        df_1min: Full 1min bar DataFrame with DatetimeIndex.
+def compute_factor_history(factor_code: str, df_1min: pd.DataFrame):
+    """Compute factor over full 1min history.
 
     Returns:
-        Series indexed by ts (1min bar close times), values = factor values.
+        - pd.Series for single-column factors (backward compatible)
+        - dict[str, pd.Series] for multi-column factors (DataFrame output)
     """
     code = _load_factor_code(factor_code)
     result = _execute_factor(code, df_1min)
-    result.index = df_1min.index
+
+    if isinstance(result, pd.DataFrame):
+        out = {}
+        for col in result.columns:
+            s = result[col].copy()
+            s = s.reindex(df_1min.index)
+            out[col] = s.dropna()
+        return out
+
+    result = result.reindex(df_1min.index)
     return result.dropna()
 
 
-def compute_factor_incremental(
-    factor_code: str,
-    df_full: pd.DataFrame,
-) -> float | None:
-    """Compute factor value for the latest 1min bar only.
-
-    Args:
-        factor_code: Factor name or raw Python code.
-        df_full: All available 1min bars up to and including current bar.
-
-    Returns:
-        Factor value at the latest bar, or None if computation fails.
-    """
+def compute_factor_incremental(factor_code: str, df_full: pd.DataFrame) -> float | dict | None:
     code = _load_factor_code(factor_code)
     try:
-        series = _execute_factor(code, df_full)
-        if series.empty:
+        result = _execute_factor(code, df_full)
+        if isinstance(result, pd.DataFrame):
+            out = {}
+            for col in result.columns:
+                s = result[col].dropna()
+                out[col] = float(s.iloc[-1]) if len(s) > 0 else 0.0
+            return out
+        if result.empty:
             return None
-        return float(series.iloc[-1])
+        return float(result.iloc[-1])
     except Exception as e:
         logger.error(f"factor_incremental failed: {e}", exc_info=True)
         return None

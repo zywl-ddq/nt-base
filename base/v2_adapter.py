@@ -109,6 +109,10 @@ class V2SignalAdapter:
         # Both projects use @dataclass StrategySignal(direction, reason) - compatible
         return StrategySignal(direction=result.direction, reason=result.reason)
 
+    def on_tick(self, price, size, is_buyer, ts_ns, symbol=""):
+        if hasattr(self._signal, "on_tick"):
+            self._signal.on_tick(price, size, is_buyer, ts_ns, symbol)
+
     def on_shutdown(self) -> None:
         if hasattr(self._signal, 'on_shutdown'):
             self._signal.on_shutdown()

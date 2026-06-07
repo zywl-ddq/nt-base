@@ -1,53 +1,18 @@
 """
-Module:    base/executor
-Purpose:   Order execution engine. Translates StrategySignals into NautilusTrader
-           market orders with position sizing, risk gating, and Telegram notifications.
+OrderExecutor v2 -- with dynamic position sizing.
 
-Class: OrderExecutor
-  __init__(sol_id, venue, portfolio, submit_order, cache)
-      sol_id: InstrumentId       鈥?trading instrument (SOLUSDT-PERP)
-      venue: Venue               鈥?exchange venue (BINANCE)
-      portfolio: Portfolio       鈥?NT portfolio for equity queries
-      submit_order: callable     鈥?Strategy.submit_order bound method
-      cache: Cache               鈥?NT cache for instrument/position queries
-
-  execute(slot, signal, price) -> str
-      Main entry: checks risk gates (tripped, cooldown), evaluates position
-      state, routes to _open or flat. Returns result status string.
-
-  _open(side, price, slot, reason)
-      Computes position size from equity * position_size_pct * leverage,
-      creates IOC market order, submits, updates slot state, sends Telegram.
-
-  flat(slot, reason)
-      Closes current position with IOC market order. Computes realized PnL
-      approximation, sends Telegram close notification with PnL and hold time.
-
-  flat_all(slots, reason)
-      Emergency close-all. Called on strategy stop or daily loss trip.
-
-Security Notes:
-  - Order quantity derived from account equity (not fixed), preventing over-leverage.
-  - IOC (Immediate-Or-Cancel) prevents partial fills from dangling.
-  - Telegram notifications are fire-and-forget (asyncio.ensure_future).
-
-Telegram Integration:
-  Each slot has independent telegram_bot_token and telegram_chat_id.
-  Notifications on: entry, exit (with PnL), reverse.
-
-Author:    nt-base system
-Version:   1.1.0
+New in v2:
+  - _open() adjusts position_size_pct by trend confidence:
+    weak trend -> smaller size (defensive)
+    strong trend -> full size (offensive)
+  - Slot stores confidence for sizing decisions
 """
-from __future__ import annotations
-'''OrderExecutor with Telegram notifications.'''
 import asyncio
 import time
 import logging
 from base.slot import StrategySlot
 from base.signal_protocol import StrategySignal
-from base.notify import (
-    send_message, fmt_entry, fmt_close,
-)
+from base.notify import send_message, fmt_entry, fmt_close
 
 logger = logging.getLogger(__name__)
 
@@ -85,11 +50,13 @@ class OrderExecutor:
             self.flat(slot, signal.reason)
             if signal.direction != 0:
                 from nautilus_trader.model.enums import OrderSide
-                self._open(OrderSide.BUY if target_long else OrderSide.SELL, current_price, slot, signal.reason)
+                self._open(OrderSide.BUY if target_long else OrderSide.SELL,
+                           current_price, slot, signal.reason)
             return "reversed" if signal.direction != 0 else "flatted"
         else:
             from nautilus_trader.model.enums import OrderSide
-            self._open(OrderSide.BUY if target_long else OrderSide.SELL, current_price, slot, signal.reason)
+            self._open(OrderSide.BUY if target_long else OrderSide.SELL,
+                       current_price, slot, signal.reason)
             return f"entry {slot.entry_side}"
 
     def _create_market_order(self, instrument_id, order_side, quantity, time_in_force):
@@ -114,13 +81,22 @@ class OrderExecutor:
                 return p
         return None
 
+    def _adjusted_size(self, slot: StrategySlot) -> float:
+        """Scale position size by trend confidence."""
+        conf = getattr(slot, 'confidence', 0.0)
+        floor = 0.25
+        slope = 0.75
+        scale = floor + slope * conf
+        return slot.position_size_pct * scale
+
     def _open(self, side, price, slot, reason):
         from nautilus_trader.model.enums import TimeInForce
         from decimal import Decimal
         instr = self._cache.instrument(self._sol_id)
         account = self._portfolio.account(self._venue)
         equity = float(account.balance_total().as_decimal())
-        notional = equity * slot.position_size_pct * slot.leverage
+        adj_size_pct = self._adjusted_size(slot)
+        notional = equity * adj_size_pct * slot.leverage
         qty = instr.make_qty(Decimal(str(notional / float(price))))
         order = self._create_market_order(
             instrument_id=self._sol_id, order_side=side,

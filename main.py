@@ -122,6 +122,7 @@ async def main():
 
     dm_config = DataManageConfig(
         instrument_ids=(SYMBOL, BTC_SYMBOL),
+        tick_instrument_ids=(SYMBOL, BTC_SYMBOL),  # DB needs BTC ticks, but dispatch filters them
         bar_timeframes=("1-SECOND", "5-SECOND", "1-MINUTE"),
     )
     node.trader.add_actor(DataManageActor(dm_config))
@@ -172,6 +173,9 @@ async def main():
 
         def _on_trade_tick_with_accum(tick):
             _original_on_trade_tick(tick)
+            iid = str(tick.instrument_id)
+            if 'SOLUSDT' not in iid:
+                return  # BTC tick: skip delta accumulation
             nonlocal _running_buyer_vol, _running_seller_vol
             size = float(tick.size)
             if tick.aggressor_side.name == "BUYER":
@@ -180,6 +184,25 @@ async def main():
                 _running_seller_vol += size
 
         dm_actor.on_trade_tick = _on_trade_tick_with_accum
+
+        # Dispatch SOL ticks to strategy slots for tick-level exits
+        _original_on_tick = dm_actor.on_trade_tick
+        def _on_trade_tick_with_exit_check(tick):
+            _original_on_tick(tick)
+            symbol = tick.instrument_id.symbol.value
+            if symbol != 'SOLUSDT-PERP':
+                return
+            tick_price = float(tick.price)
+            for slot in registry.all_slots():
+                if hasattr(slot.strategy, 'on_tick'):
+                    slot.strategy.on_tick(
+                        tick_price, float(tick.size),
+                        tick.aggressor_side.name == 'BUYER',
+                        tick.ts_event,
+                        symbol,
+                    )
+
+        dm_actor.on_trade_tick = _on_trade_tick_with_exit_check
 
         def _on_bar_with_dispatch(bar):
             _original_on_bar(bar)
@@ -238,13 +261,20 @@ async def main():
                 from factor.compute import compute_factor_history
                 for fname in active:
                     try:
-                        series = compute_factor_history(fname, df)
-                        val = series.dropna().iloc[-1] if len(series.dropna()) > 0 else 0.0
-                        factors[fname] = float(val)
+                        result = compute_factor_history(fname, df)
+                        if isinstance(result, dict):
+                            for sub_name, sub_series in result.items():
+                                v = sub_series.dropna().iloc[-1] if len(sub_series.dropna()) > 0 else 0.0
+                                factors[sub_name] = float(v)
+                        else:
+                            val = result.dropna().iloc[-1] if len(result.dropna()) > 0 else 0.0
+                            factors[fname] = float(val)
                     except Exception as e:
                         logger.warning(f"factor {fname} failed: {e}")
                         factors[fname] = 0.0
                 logger.info(f"factors computed: {factors}")
+
+            confidence = factors.get("trend_confidence", 0.0)
 
             for slot in slots:
                 bar_data = {
@@ -256,8 +286,11 @@ async def main():
                 }
                 signal = slot.strategy.on_bar(bar_data)
                 if signal is not None:
+                    slot.confidence = confidence
                     if signal.direction != 0:
                         result = executor.execute(slot, signal, float(bar.close))
+                    elif signal.reason == "hold":
+                        result = "hold"
                     else:
                         result = str(executor.flat(slot, signal.reason))
                     logger.info(f"Signal: {slot.strategy_id} dir={signal.direction} reason={signal.reason} result={result}")

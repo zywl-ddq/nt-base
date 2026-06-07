@@ -7,16 +7,16 @@ Purpose:   SOL alpha vs BTC benchmark. Removes market (BTC) beta from SOL
 Algorithm:
   1. Resample 1m bars to 5m
   2. Compute log returns for SOL and BTC
-  3. Rolling OLS: SOL_ret = alpha + beta * BTC_ret over ROLLING_BETA (288) bars
+  3. Rolling OLS: SOL_ret = alpha + beta * BTC_ret over ROLLING_BETA bars
   4. Residual = actual SOL_ret - predicted SOL_ret
-  5. Z-score residuals over Z_HISTORY (288) bars -> momentum signal
+  5. Z-score residuals over Z_HISTORY bars -> momentum signal
 
 Parameters:
-  ROLLING_BETA = 60   OLS window (~24h at 5m)
+  ROLLING_BETA = 60   OLS window (~5h at 5m)
   MOM_WINDOW = 12      momentum lookback
   Z_HISTORY = 60      Z-score normalization window
 
-Output: pd.Series of residual momentum values
+Output: pd.Series of residual momentum z-score values
 
 Pre-conditions:
   df must have 'btc_close' column (BTC 1m close prices joined to SOL bars).
@@ -28,15 +28,7 @@ Edge Cases:
 
 Dependencies: numpy, pandas (from sandbox namespace)
 Author:    nt-base / trading-v2
-Version:   1.0.0
-"""
-"""Residual Momentum Factor -- SOL alpha vs BTC benchmark.
-
-Removes market (BTC) beta from SOL returns to isolate idiosyncratic alpha.
-Uses rolling OLS over 288 x 5m bars (24h) to compute beta,
-then Z-scores the cumulative residual return.
-
-Works on 5m bars. Requires btc_close column in df.
+Version:   1.1.0
 """
 import numpy as np
 import pandas as pd
@@ -47,7 +39,6 @@ Z_HISTORY = 60
 
 
 def factor_residual_momentum(df, timescale="5min"):
-    # Resample 1m to 5m if needed
     if "btc_close" not in df.columns:
         return pd.Series(0.0, index=df.index, name="residual_momentum")
 
@@ -59,13 +50,22 @@ def factor_residual_momentum(df, timescale="5min"):
     if len(df_sol) < ROLLING_BETA:
         return pd.Series(0.0, index=df.index, name="residual_momentum")
 
+    # Resample 1m to 5m
+    if timescale == "5min":
+        df_sol = df_sol.resample("5min").last().dropna()
+
+    if len(df_sol) < ROLLING_BETA:
+        return pd.Series(0.0, index=df.index, name="residual_momentum")
+
     df_sol["sol_ret"] = np.log(df_sol["sol_close"] / df_sol["sol_close"].shift(1))
     df_sol["btc_ret"] = np.log(df_sol["btc_close"] / df_sol["btc_close"].shift(1))
     df_sol.dropna(inplace=True)
 
+    if len(df_sol) < ROLLING_BETA:
+        return pd.Series(0.0, index=df.index, name="residual_momentum")
+
     n = len(df_sol)
     window = min(ROLLING_BETA, n)
-    betas = np.full(n, np.nan)
     resids = np.full(n, np.nan)
 
     sol_ret = df_sol["sol_ret"].values
@@ -76,9 +76,15 @@ def factor_residual_momentum(df, timescale="5min"):
         yi = sol_ret[i - window + 1 : i + 1]
         X = np.vstack([np.ones(len(xi)), xi]).T
         coeff, _, _, _ = np.linalg.lstsq(X, yi, rcond=None)
-        betas[i] = coeff[1]
         resids[i] = yi[-1] - (coeff[0] + coeff[1] * xi[-1])
 
-    result = pd.Series(0.0, index=df.index, name="residual_momentum")
-    result.iloc[:n] = resids
+    residual_series = pd.Series(resids, index=df_sol.index, name="residual_momentum")
+
+    # Z-score normalization over Z_HISTORY bars
+    rolling_mean = residual_series.rolling(Z_HISTORY, min_periods=10).mean()
+    rolling_std = residual_series.rolling(Z_HISTORY, min_periods=10).std().replace(0, np.nan)
+    z_scored = (residual_series - rolling_mean) / rolling_std
+
+    # Reindex back to original 1m index, forward-fill 5m values
+    result = z_scored.reindex(df.index).ffill()
     return result
