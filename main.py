@@ -55,6 +55,9 @@ from base.registration import RegistrationManager
 from nautilus_trader.trading.strategy import Strategy
 from nautilus_trader.model.identifiers import InstrumentId, Venue
 
+# gRPC server (strategy communication)
+from base.grpc_server import TradingBaseServicer, start_grpc_server
+
 logger = setup_logging("nt_base")
 VENUE_NAME = "BINANCE"
 SYMBOL = f"{cfg.primary_symbol}-PERP.{VENUE_NAME}"
@@ -136,6 +139,11 @@ async def main():
     node.trader.add_strategy(base_strat)
 
     node.build()
+
+    # Start gRPC server for strategy communication
+    grpc_servicer = TradingBaseServicer()
+    grpc_server = await start_grpc_server(grpc_servicer)
+    logger.info("gRPC server started (unix:///tmp/nt_base_grpc.sock + :50051)")
 
     reg_mgr = RegistrationManager(registry, pool, symbol="SOLUSDT-PERP", timeframe="1m")
     reg_task = asyncio.create_task(reg_mgr.run())
@@ -275,6 +283,25 @@ async def main():
                         factors[fname] = 0.0
                 logger.info(f"factors computed: {factors}")
 
+                # Build and push Bar via gRPC to subscribed strategies
+                df = pd.DataFrame(list(_bar_buffer))
+                df["ts"] = pd.to_datetime(df["ts"])
+                df = df.set_index("ts")
+                # Ensure required columns exist
+                for col in ["delta", "taker_buy_volume", "taker_sell_volume", "btc_close"]:
+                    if col not in df.columns:
+                        df[col] = 0.0
+                pb_bar = grpc_servicer.build_bar(
+                    symbol=SYMBOL, ts_ns=bar.ts_event,
+                    open_p=float(bar.open), high=float(bar.high),
+                    low=float(bar.low), close=float(bar.close),
+                    volume=volume, delta=delta,
+                    taker_buy=buyer_vol, taker_sell=seller_vol,
+                    btc_close=_latest_btc_close,
+                    df_bars=df,
+                )
+                grpc_servicer.push_bar(pb_bar)
+
             confidence = factors.get("trend_confidence", 0.0)
 
             for slot in slots:
@@ -317,6 +344,8 @@ async def main():
         pass
     finally:
         logger.info("Shutting down...")
+        await grpc_server.stop(grace=5.0)
+        logger.info("gRPC server stopped")
         await reg_mgr.stop()
         reg_task.cancel()
         try: await reg_task
