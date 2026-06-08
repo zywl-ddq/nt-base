@@ -63,7 +63,23 @@ class FactorEngine:
             logger.error(f"Factor '{name}' execution error: {e}")
             return None
 
-        # Look for a Series matching the factor name
+        # Pattern 1: Callable function named factor_*
+        import inspect
+        for key, obj in namespace.items():
+            if callable(obj) and key.startswith("factor_"):
+                try:
+                    sig = inspect.signature(obj)
+                    kwargs = {"df": namespace["df"]}
+                    if "timescale" in sig.parameters:
+                        kwargs["timescale"] = "1min"
+                    result = obj(**kwargs)
+                    if isinstance(result, pd.Series) and not result.empty:
+                        val = result.dropna()
+                        return float(val.iloc[-1]) if len(val) > 0 else 0.0
+                except Exception as e:
+                    logger.error(f"Factor '{name}' call error: {e}")
+
+        # Pattern 2: Pre-computed Series in namespace
         for key in (name, f"factor_{name}"):
             obj = namespace.get(key)
             if isinstance(obj, pd.Series) and not obj.empty:
@@ -90,6 +106,24 @@ class FactorEngine:
             logger.error(f"Factor '{name}' batch error: {e}")
             return None
 
+        # Pattern 1: Callable function
+        import inspect
+        for key, obj in namespace.items():
+            if callable(obj) and key.startswith("factor_"):
+                try:
+                    sig = inspect.signature(obj)
+                    kwargs = {"df": namespace["df"]}
+                    if "timescale" in sig.parameters:
+                        kwargs["timescale"] = "1min"
+                    result = obj(**kwargs)
+                    if isinstance(result, pd.Series):
+                        result = pd.to_numeric(result, errors="coerce")
+                        result.index = df_bars.index
+                        return result.dropna()
+                except Exception as e:
+                    logger.error(f"Factor '{name}' batch call error: {e}")
+
+        # Pattern 2: Pre-computed Series
         for key in (name, f"factor_{name}"):
             obj = namespace.get(key)
             if isinstance(obj, pd.Series):

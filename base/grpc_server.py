@@ -30,11 +30,14 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
       5. Strategy calls Unregister or disconnects — base cleans up
     """
 
-    def __init__(self):
+    def __init__(self, db_pool=None):
+        self._pool = db_pool
         self._strategies: dict[str, dict] = {}
         self._factor_engine = FactorEngine()
         # Bar queues per strategy: strategy_id → asyncio.Queue
         self._bar_queues: dict[str, asyncio.Queue] = {}
+        # Control queues per strategy: Telegram -> gRPC push
+        self._control_queues: dict[str, asyncio.Queue] = {}
         # Pending signals from strategy → processed by main loop
         self._pending_signals: asyncio.Queue = asyncio.Queue()
 
@@ -43,7 +46,10 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
     async def Register(self, request: pb.StrategyConfig, context) -> pb.RegisterAck:
         sid = request.strategy_id
         if sid in self._strategies:
-            return pb.RegisterAck(ok=False, error=f"already registered: {sid}")
+            # Reconnect: clear disconnect marker, allow re-subscription
+            self._strategies[sid]["disconnected_at"] = None
+            logger.info(f"gRPC Re-register (reconnect): {sid}")
+            return pb.RegisterAck(ok=True)
 
         # Compile and register factor code
         for fd in request.factors:
@@ -56,12 +62,34 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
             except SyntaxError as e:
                 return pb.RegisterAck(ok=False, error=f"Factor '{fd.name}' syntax: {e}")
 
+        # Read Telegram credentials from DB (use injected pool)
+        token = ""
+        chat_id = ""
+        if self._pool is not None:
+            try:
+                async with self._pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT telegram_bot_token, telegram_chat_id "
+                        "FROM strategy_instances WHERE instance_id = $1",
+                        sid,
+                    )
+                    if row:
+                        token = row["telegram_bot_token"] or ""
+                        chat_id = row["telegram_chat_id"] or ""
+            except Exception as e:
+                logger.warning(f"Telegram creds lookup failed for {sid}: {e}")
+
         self._strategies[sid] = {
             "config": request,
             "registered_at": time.time(),
             "required_fields": list(request.required_fields),
+            "telegram_bot_token": token,
+            "telegram_chat_id": chat_id,
+            "disconnected_at": None,
+            "grace_period_sec": 60,
         }
         self._bar_queues[sid] = asyncio.Queue(maxsize=100)
+        self._control_queues[sid] = asyncio.Queue(maxsize=50)
 
         logger.info(
             f"gRPC Register: {sid} factors={self._factor_engine.registered_names()} "
@@ -80,34 +108,69 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
     # ── Bar Streaming ─────────────────────────────────────
 
     async def SubscribeBars(self, request: pb.BarRequest, context):
-        """Server-streaming RPC: push Bar messages to strategy.
-
-        The strategy_id is extracted from gRPC metadata or from the
-        most recently registered strategy for this connection.
-        """
-        # Find which strategy this stream belongs to
-        sid = None
-        for s_id, q in self._bar_queues.items():
-            if q is not None:
-                sid = s_id
-                break
+        logger.info(f"[SUB] SubscribeBars ENTER: queues={list(self._bar_queues.keys())}")
+        sid = list(self._bar_queues.keys())[-1] if self._bar_queues else None
         if sid is None:
+            logger.error("[SUB] no registered strategy")
             await context.abort(grpc.StatusCode.NOT_FOUND, "no registered strategy")
             return
 
         queue = self._bar_queues[sid]
-        logger.info(f"SubscribeBars: {sid} symbol={request.symbol}")
+        logger.info(f"[SUB] Starting stream for {sid} qsize={queue.qsize()}")
 
-        while context.is_active():
-            try:
-                bar = await asyncio.wait_for(queue.get(), timeout=30.0)
-                yield bar
-            except asyncio.TimeoutError:
-                continue
-            except asyncio.CancelledError:
-                break
+        bar_count = 0
+        try:
+            while True:
+                try:
+                    logger.info(f"[SUB] waiting (count={bar_count})...")
+                    bar = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    bar_count += 1
+                    logger.info(f"[SUB] yielding bar #{bar_count}")
+                    yield bar
+                    logger.info(f"[SUB] after yield #{bar_count}")
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    logger.info(f"[SUB] cancelled after {bar_count} bars")
+                    return
+        except Exception as e:
+            logger.error(f"[SUB] crash: {type(e).__name__}: {e}", exc_info=True)
+        finally:
+            if sid and sid in self._strategies:
+                self._strategies[sid]["disconnected_at"] = time.time()
+                logger.warning(f"[SUB] Strategy {sid} DISCONNECTED, grace={self._strategies[sid]['grace_period_sec']}s")
+        logger.info(f"[SUB] EXIT after {bar_count} bars")
+    # ---- Control Streaming ----
 
-    # ── Signal Submission ─────────────────────────────────
+    async def SubscribeControl(self, request: pb.ControlRequest, context):
+        """Server-pushed control commands to strategy client."""
+        sid = request.strategy_id
+        if sid not in self._control_queues:
+            logger.error(f"[CTL] unknown strategy: {sid}")
+            await context.abort(grpc.StatusCode.NOT_FOUND, f"unknown strategy: {sid}")
+            return
+
+        queue = self._control_queues[sid]
+        logger.info(f"[CTL] Control stream started for {sid}")
+
+        cmd_count = 0
+        try:
+            while True:
+                try:
+                    cmd = await asyncio.wait_for(queue.get(), timeout=60.0)
+                    cmd_count += 1
+                    logger.info(f"[CTL] pushing command #{cmd_count}: type={cmd.type} to {sid}")
+                    yield cmd
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    logger.info(f"[CTL] cancelled after {cmd_count} commands")
+                    return
+        except Exception as e:
+            logger.error(f"[CTL] crash: {type(e).__name__}: {e}", exc_info=True)
+        logger.info(f"[CTL] Control stream ended for {sid} after {cmd_count} commands")
+
+    # ---- Signal Submission ----
 
     async def SubmitSignal(self, request: pb.Signal, context) -> pb.SignalAck:
         """Strategy submits a trading signal. Base queues it for execution."""
@@ -131,6 +194,19 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
                 queue.put_nowait(pb_bar)
             except asyncio.QueueFull:
                 logger.warning(f"Bar queue full for {sid}, dropping")
+
+    def push_control(self, sid: str, cmd: pb.ControlCommand):
+        """Push a ControlCommand to a specific strategy's control queue."""
+        if sid not in self._control_queues:
+            logger.warning(f"[CTL] No control queue for {sid}, dropping command")
+            return False
+        try:
+            self._control_queues[sid].put_nowait(cmd)
+            logger.info(f"[CTL] Queued command type={cmd.type} for {sid}")
+            return True
+        except asyncio.QueueFull:
+            logger.warning(f"[CTL] Control queue full for {sid}, dropping command")
+            return False
 
     def build_bar(
         self,
@@ -172,6 +248,26 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
             except asyncio.QueueEmpty:
                 break
         return signals
+
+    def orphaned_strategies(self) -> list[str]:
+        """Return strategy IDs that have been disconnected past their grace period."""
+        orphans = []
+        now = time.time()
+        for sid, info in list(self._strategies.items()):
+            disc_at = info.get("disconnected_at")
+            if disc_at is None:
+                continue
+            grace = info.get("grace_period_sec", 60)
+            if now - disc_at > grace:
+                orphans.append(sid)
+        return orphans
+
+    def cleanup_strategy(self, sid: str):
+        """Remove a strategy registration and bar queue after orphan flat."""
+        self._strategies.pop(sid, None)
+        self._bar_queues.pop(sid, None)
+        self._control_queues.pop(sid, None)
+        logger.info(f"gRPC Cleanup: removed {sid}")
 
 
 async def start_grpc_server(

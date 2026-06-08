@@ -9,6 +9,7 @@ service TradingBase {
   rpc SubmitSignal(Signal) returns (SignalAck);
   rpc GetState(StateRequest) returns (StateResponse);
   rpc ClosePosition(CloseRequest) returns (CloseAck);
+  rpc SubscribeControl(ControlRequest) returns (stream ControlCommand);
 }
 
 message StrategyConfig {
@@ -101,6 +102,34 @@ message TrailingStop {
 message SignalAck {
   bool accepted = 1;
   string reject_reason = 2;
+}
+
+// ============================================================
+// ControlStream: server-pushed commands to strategy clients
+// ============================================================
+
+message ControlRequest {
+  string strategy_id = 1;
+}
+
+message ControlCommand {
+  enum Type {
+    PAUSE = 0;
+    RESUME = 1;
+    ADJUST_PARAM = 2;
+    RELOAD_FACTORS = 3;
+    SHUTDOWN = 4;
+    PING = 5;
+  }
+  Type type = 1;
+  string reason = 2;
+  map<string, string> params = 3;
+  int64 ts_ns = 4;
+}
+
+message ControlAck {
+  bool accepted = 1;
+  string message = 2;
 }
 
 message StateRequest {}

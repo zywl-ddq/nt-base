@@ -133,9 +133,9 @@ class OrderExecutor:
         side_was = slot.entry_side if slot.has_position else ("LONG" if pos.side.name == "LONG" else "SHORT")
         if exit_px > 0 and entry_px > 0:
             if side_was == "LONG":
-                pnl = (exit_px - entry_px) / entry_px * slot.position_size_pct * slot.leverage * 1000
+                pnl = float(pos.quantity.as_decimal()) * (exit_px - entry_px)
             else:
-                pnl = (entry_px - exit_px) / entry_px * slot.position_size_pct * slot.leverage * 1000
+                pnl = float(pos.quantity.as_decimal()) * (entry_px - exit_px)
         else:
             pnl = 0.0
 
