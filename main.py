@@ -11,7 +11,7 @@ Execution Flow:
   3. build_trading_node()      鈥?create NT TradingNode (sandbox)
   4. DataManageActor           鈥?subscribe bars/ticks/L2/OI + persist to DB
   5. BaseStrategy(NT)          鈥?owns OrderExecutor + RiskLoop
-  6. RegistrationManager       鈥?polls strategy_instances, hot-registers strategies
+  6. gRPC Server               鈥?unix socket + TCP, strategy registration
   7. Bar dispatch monkey-patch 鈥?intercepts dm_actor.on_bar for factor computation
                                  and strategy signal dispatch
 
@@ -21,9 +21,9 @@ Bar Dispatch (monkey-patched dm_actor.on_bar):
   Signal != 0 -> OrderExecutor.execute(slot, signal, price)
 
 Dynamic Registration:
-  RegistrationManager polls strategy_instances table every 5s.
-  New 'pending' entries are hot-activated without restart.
-  DB schema: CREATE TABLE strategy_instances (instance_id, params, ...)
+  Strategies register via gRPC Register() at startup.
+  Registration is in-memory only ??no DB persistence needed.
+  When nt-base restarts, strategies reconnect and re-register.
 
 Shutdown:
   SIGTERM -> flat_all positions -> deregister strategies -> close DB pool
@@ -51,7 +51,6 @@ from base.registry import StrategyRegistry
 from base.executor import OrderExecutor
 from risk.loop import RiskLoop
 from risk.tick_exit import TickExitManager
-from base.registration import RegistrationManager
 from nautilus_trader.trading.strategy import Strategy
 from nautilus_trader.model.identifiers import InstrumentId, Venue
 
@@ -167,26 +166,17 @@ async def main():
 
     node.build()
 
-    # Clean stale strategy registrations from previous run
-    async with pool.acquire() as conn:
-        result = await conn.execute(
-            "UPDATE strategy_instances SET status = 'pending' WHERE status = 'active'"
-        )
-        cleaned = int(result.split()[-1]) if result else 0
-        if cleaned:
-            logger.info(f"Cleaned {cleaned} stale strategy registration(s)")
-
     # Start gRPC server for strategy communication
-    grpc_servicer = TradingBaseServicer()
+    grpc_servicer = TradingBaseServicer(
+        telegram_bot_token=cfg.telegram.bot_token,
+        telegram_chat_id=str(cfg.telegram.admin_chat_id),
+    )
     grpc_server = await start_grpc_server(grpc_servicer)
     logger.info("gRPC server started (unix:///tmp/nt_base_grpc.sock + :50051)")
 
     # Wire gRPC servicer to base strategy for signal execution
     base_strat._grpc_servicer = grpc_servicer
 
-    reg_mgr = RegistrationManager(registry, pool, symbol="SOLUSDT-PERP", timeframe="1m")
-    reg_task = asyncio.create_task(reg_mgr.run())
-    logger.info("RegistrationManager started")
 
     # ── Wire bar dispatch ──
     # Find DataManageActor — NT stores actors in trader._actors (list or dict)
@@ -414,10 +404,6 @@ async def main():
         logger.info("Shutting down...")
         await grpc_server.stop(grace=5.0)
         logger.info("gRPC server stopped")
-        await reg_mgr.stop()
-        reg_task.cancel()
-        try: await reg_task
-        except asyncio.CancelledError: pass
         node.dispose()
         await close_pool()
         logger.info("nt-base stopped")

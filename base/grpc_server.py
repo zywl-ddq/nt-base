@@ -54,8 +54,9 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
         self._get_price = get_price
         logger.info("gRPC execution context set")
 
-    def __init__(self, db_pool=None):
-        self._pool = db_pool
+    def __init__(self, telegram_bot_token: str = "", telegram_chat_id: str = ""):
+        self._default_bot_token = telegram_bot_token
+        self._default_chat_id = telegram_chat_id
         self._strategies: dict[str, dict] = {}
         self._factor_engine = FactorEngine()
         # Bar queues per strategy: strategy_id → asyncio.Queue
@@ -86,22 +87,11 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
             except SyntaxError as e:
                 return pb.RegisterAck(ok=False, error=f"Factor '{fd.name}' syntax: {e}")
 
-        # Read Telegram credentials from DB (use injected pool)
-        token = ""
-        chat_id = ""
-        if self._pool is not None:
-            try:
-                async with self._pool.acquire() as conn:
-                    row = await conn.fetchrow(
-                        "SELECT telegram_bot_token, telegram_chat_id "
-                        "FROM strategy_instances WHERE instance_id = $1",
-                        sid,
-                    )
-                    if row:
-                        token = row["telegram_bot_token"] or ""
-                        chat_id = row["telegram_chat_id"] or ""
-            except Exception as e:
-                logger.warning(f"Telegram creds lookup failed for {sid}: {e}")
+        # Telegram credentials: from env cfg (single-bot, shared by all strategies)
+        from shared.env import cfg
+        token = cfg.telegram.bot_token
+        chat_id = str(cfg.telegram.admin_chat_id)
+        logger.info(f"gRPC Register {sid}: telegram configured (chat={chat_id})")
 
         self._strategies[sid] = {
             "config": request,
@@ -226,8 +216,8 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
                     leverage=int(cfg.max_leverage) if cfg.max_leverage else 2,
                     position_size_pct=float(cfg.max_position_pct) if cfg.max_position_pct else 0.20,
                     symbol="SOLUSDT-PERP",
-                    telegram_bot_token=info.get("telegram_bot_token") or "8730820649:AAGc1uH70e76480dWWcXaCrjhixmCLKDRNY",
-                    telegram_chat_id=info.get("telegram_chat_id") or "8491479697",
+                    telegram_bot_token=info.get("telegram_bot_token") or self._default_bot_token,
+                    telegram_chat_id=info.get("telegram_chat_id") or self._default_chat_id,
                 )
                 registry.register(slot)
                 logger.info(f"Slot created for gRPC strategy: {sid}")

@@ -36,9 +36,8 @@ def get_manager():
 class TelegramManager:
     """Manages all per-strategy Telegram bots."""
 
-    def __init__(self, db_pool, executor=None, registry=None, grpc_servicer=None,
+    def __init__(self, executor=None, registry=None, grpc_servicer=None,
                  admin_chat_id: str = ""):
-        self._pool = db_pool
         self._executor = executor
         self._registry = registry
         self._grpc = grpc_servicer
@@ -46,27 +45,21 @@ class TelegramManager:
         self._bots: dict[str, StrategyBot] = {}
 
     async def start_all(self):
-        """Create and start bots for all active strategy instances."""
+        """Create and start bots for all registered strategies (from memory)."""
         from base.telegram.bot import StrategyBot
 
-        if not self._pool:
-            logger.warning("No DB pool, skipping Telegram bots")
+        if not self._grpc:
+            logger.warning("No gRPC servicer, skipping Telegram bots")
             return
 
-        try:
-            async with self._pool.acquire() as conn:
-                rows = await conn.fetch(
-                    "SELECT instance_id, telegram_bot_token, telegram_chat_id "
-                    "FROM strategy_instances WHERE status = 'active'"
-                )
-        except Exception as e:
-            logger.error(f"Failed to load strategy instances: {e}")
+        strategies = getattr(self._grpc, '_strategies', {})
+        if not strategies:
+            logger.info("No registered strategies, skipping Telegram bots")
             return
 
-        for row in rows:
-            sid = row["instance_id"]
-            token = (row["telegram_bot_token"] or "").strip()
-            chat_id = (row["telegram_chat_id"] or "").strip()
+        for sid, info in strategies.items():
+            token = (info.get("telegram_bot_token") or "").strip()
+            chat_id = (info.get("telegram_chat_id") or "").strip()
 
             if not token or not chat_id:
                 logger.warning(f"Skipping bot for {sid}: missing token or chat_id")
