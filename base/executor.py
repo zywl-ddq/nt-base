@@ -107,11 +107,10 @@ class OrderExecutor:
             quantity=qty, time_in_force=TimeInForce.IOC,
         )
         self._submit_order(order)
-        slot.open_position("LONG" if side.name == "BUY" else "SHORT", price)
         slot.last_trade_time = time.time()
 
         side_str = "LONG" if side.name == "BUY" else "SHORT"
-        # Defer notification to on_fill for actual fill price
+        # Defer notification AND slot state update to on_fill for actual fill price
         cid = str(order.client_order_id)
         self._pending[cid] = {
             "type": "entry",
@@ -144,21 +143,20 @@ class OrderExecutor:
         )
         self._submit_order(order)
 
+        # Read slot state BEFORE any changes — flat() is an action, not a result.
+        # Slot state will be updated by on_fill() when the fill is confirmed.
         entry_px = slot.entry_price if slot.has_position else float(pos.avg_px_open)
         side_was = slot.entry_side if slot.has_position else ("LONG" if pos.side.name == "LONG" else "SHORT")
-        held_sec = slot.held_sec  # snapshot before reset
 
-        slot.reset_position()
         logger.info(f"FLAT {slot.strategy_id} reason={reason}")
 
-        # Defer notification to on_fill for actual exit price
+        # Defer notification AND slot state update to on_fill for actual exit price
         cid = str(order.client_order_id)
         self._pending[cid] = {
             "type": "close",
             "slot": slot,
             "side_was": side_was,
             "entry_px": entry_px,
-            "held_sec": held_sec,
             "reason": reason,
             "estimated_exit_px": exit_px,
             "expected_qty": float(pos.quantity.as_decimal()),
@@ -196,9 +194,8 @@ class OrderExecutor:
         slot = pending["slot"]
 
         if pending["type"] == "entry":
-            # Correct slot entry price to actual fill VWAP
-            if slot.has_position and slot.entry_price != vwap:
-                slot.entry_price = vwap
+            # Update slot state on confirmed fill
+            slot.open_position(pending["side"], vwap)
             _notify(slot, fmt_entry(
                 slot.strategy_id, str(self._sol_id), pending["side"],
                 vwap, pending["accum_qty"], pending["notional"], pending["reason"],
@@ -207,13 +204,16 @@ class OrderExecutor:
         elif pending["type"] == "close":
             entry_px = pending["entry_px"]
             qty = pending["accum_qty"]
+            held_sec = slot.held_sec  # compute at fill time, slot hasn't been reset yet
             if pending["side_was"] == "LONG":
                 pnl = qty * (vwap - entry_px) - pending["total_commission"]
             else:
                 pnl = qty * (entry_px - vwap) - pending["total_commission"]
+            # Update slot state on confirmed fill
+            slot.reset_position()
             _notify(slot, fmt_close(
                 slot.strategy_id, str(self._sol_id), pending["side_was"],
-                entry_px, vwap, pnl, pending["held_sec"], pending["reason"],
+                entry_px, vwap, pnl, held_sec, pending["reason"],
             ))
 
         del self._pending[client_order_id]
@@ -236,24 +236,84 @@ class OrderExecutor:
                     px = p.get("estimated_exit_px", 0)
                     entry_px = p["entry_px"]
                     qty = p["expected_qty"]
+                    held_sec = slot.held_sec  # read from slot at flush time
                     if p["side_was"] == "LONG":
                         pnl = qty * (px - entry_px) - p["total_commission"] if px > 0 else -p["total_commission"]
                     else:
                         pnl = qty * (entry_px - px) - p["total_commission"] if px > 0 else -p["total_commission"]
                     _notify(slot, fmt_close(
                         slot.strategy_id, str(self._sol_id), p["side_was"],
-                        entry_px, px, pnl, p["held_sec"], p["reason"] + " (est)",
+                        entry_px, px, pnl, held_sec, p["reason"] + " (est)",
                     ))
         for cid in stale:
             del self._pending[cid]
         if stale:
             logger.info(f"flush_pending: sent {len(stale)} stale notifications")
 
-    def cleanup_pending(self, max_age_sec: float = 60.0):
-        """Remove pending entries older than max_age_sec (fill never arrived)."""
+    def accept_partial_fill(self, client_order_id: str):
+        """Accept whatever quantity has filled so far.
+        Called when an order is canceled/expired (IOC remainder canceled)."""
+        pending = self._pending.get(client_order_id)
+        if pending is None:
+            return
+        if pending["accum_qty"] <= 0:
+            del self._pending[client_order_id]
+            return
+
+        vwap = pending["accum_notional"] / pending["accum_qty"]
+        slot = pending["slot"]
+
+        if pending["type"] == "entry":
+            # Only update slot if no position is tracked yet (avoid double-open).
+            if slot.has_position:
+                del self._pending[client_order_id]
+                return
+            slot.open_position(pending["side"], vwap)
+            _notify(slot, fmt_entry(
+                slot.strategy_id, str(self._sol_id), pending["side"],
+                vwap, pending["accum_qty"], pending["notional"],
+                pending["reason"] + " (partial)",
+            ))
+
+        elif pending["type"] == "close":
+            # Only send partial notification if position still open.
+            # If already closed by a subsequent fill, skip silently.
+            if not slot.has_position:
+                del self._pending[client_order_id]
+                return
+            entry_px = pending["entry_px"]
+            qty = pending["accum_qty"]
+            held_sec = slot.held_sec  # compute now, slot not reset for partial close
+            if pending["side_was"] == "LONG":
+                pnl = qty * (vwap - entry_px) - pending["total_commission"]
+            else:
+                pnl = qty * (entry_px - vwap) - pending["total_commission"]
+            # Do NOT reset slot — position still exists (just reduced).
+            _notify(slot, fmt_close(
+                slot.strategy_id, str(self._sol_id), pending["side_was"],
+                entry_px, vwap, pnl, held_sec,
+                pending["reason"] + " (partial)",
+            ))
+
+        del self._pending[client_order_id]
+
+    def cleanup_pending(self, max_age_sec: float = 10.0):
+        """Handle stale pending entries. For orders with partial fills, accept
+        whatever filled. For orders with zero fills, log and discard."""
         now = time.time()
         stale = [cid for cid, p in self._pending.items() if now - p["created_at"] > max_age_sec]
         for cid in stale:
-            logger.warning(f"cleanup_pending: fill never arrived for {cid} ({self._pending[cid]['type']})")
-            del self._pending[cid]
+            p = self._pending.get(cid)
+            if p and p.get("accum_qty", 0) > 0:
+                logger.warning(
+                    f"cleanup_pending: partial accept for {cid} ({p['type']}), "
+                    f"filled {p['accum_qty']}/{p['expected_qty']}"
+                )
+                self.accept_partial_fill(cid)
+            else:
+                logger.warning(
+                    f"cleanup_pending: fill never arrived for {cid} ({p['type']})"
+                )
+                if cid in self._pending:
+                    del self._pending[cid]
         return len(stale)

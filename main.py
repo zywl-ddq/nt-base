@@ -98,7 +98,7 @@ class BaseStrategy(Strategy):
     async def _cleanup_pending_loop(self):
         """Periodically clean stale pending fill notifications."""
         while True:
-            await asyncio.sleep(60)
+            await asyncio.sleep(10)
             if self._executor:
                 n = self._executor.cleanup_pending()
                 if n:
@@ -110,6 +110,18 @@ class BaseStrategy(Strategy):
             cid = str(event.client_order_id)
             commission = float(event.commission.as_decimal()) if event.commission else 0.0
             self._executor.on_fill(cid, float(event.last_px), float(event.last_qty), commission)
+
+    def on_order_canceled(self, event):
+        """IOC remainder canceled — accept whatever quantity filled."""
+        if self._executor:
+            cid = str(event.client_order_id)
+            self._executor.accept_partial_fill(cid)
+
+    def on_order_expired(self, event):
+        """Order expired — accept whatever quantity filled."""
+        if self._executor:
+            cid = str(event.client_order_id)
+            self._executor.accept_partial_fill(cid)
 
     def on_stop(self):
         if self._risk_loop:
