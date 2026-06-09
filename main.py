@@ -92,12 +92,29 @@ class BaseStrategy(Strategy):
                 get_price=lambda: self._latest_price.get(SYMBOL, 0.0),
             )
             self.log.info("gRPC execution context wired")
+        asyncio.create_task(self._cleanup_pending_loop())
         self.log.info("BaseStrategy started: executor + risk_loop ready")
+
+    async def _cleanup_pending_loop(self):
+        """Periodically clean stale pending fill notifications."""
+        while True:
+            await asyncio.sleep(60)
+            if self._executor:
+                n = self._executor.cleanup_pending()
+                if n:
+                    self.log.warning(f"Cleaned {n} stale pending notifications")
+
+    def on_order_filled(self, event):
+        """Route NT fill events to executor for actual-fill-price notifications."""
+        if self._executor:
+            cid = str(event.client_order_id)
+            self._executor.on_fill(cid, float(event.last_px), float(event.last_qty))
 
     def on_stop(self):
         if self._risk_loop:
             asyncio.create_task(self._risk_loop.stop())
         if self._executor:
+            self._executor.flush_pending()
             self._executor.flat_all(self._registry.all_slots(), "on_stop")
         self.log.info("BaseStrategy stopped")
 

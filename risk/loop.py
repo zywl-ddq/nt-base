@@ -23,7 +23,8 @@ Execution Order (per tick, per slot):
   Daily trip sets slot.tripped = True (permanent disable until manual reset).
 
 Telegram Integration:
-  Risk exits send fmt_risk_exit or fmt_daily_trip notifications per slot config.
+  Risk exits are notified via executor.flat() -> fmt_close (single notification,
+  with enriched reason string indicating the trigger).
 
 Performance:
   O(active_slots) per tick. With typical 1-3 active slots, negligible overhead.
@@ -36,16 +37,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from risk.checker import check_stop, check_take, check_hold, check_daily
-from base.notify import send_message, fmt_risk_exit, fmt_daily_trip
 
 logger = logging.getLogger(__name__)
 
-
-def _notify(slot, text: str):
-    if slot.telegram_bot_token and slot.telegram_chat_id:
-        asyncio.ensure_future(
-            send_message(slot.telegram_bot_token, slot.telegram_chat_id, text)
-        )
 
 
 class RiskLoop:
@@ -88,21 +82,13 @@ class RiskLoop:
                 daily = check_daily(slot)
                 if daily.should_exit:
                     slot.tripped = True
-                    self._executor.flat(slot, daily.reason)
-                    _notify(slot, fmt_daily_trip(
-                        slot.strategy_id, symbol,
-                        slot.daily_pnl, slot.max_daily_loss_pct,
-                    ))
+                    self._executor.flat(slot, f"{daily.reason} | CB {slot.max_daily_loss_pct*100:.1f}% paused")
                     continue
 
                 for check in [check_stop, check_take, check_hold]:
                     action = check(slot, price)
                     if action.should_exit:
                         self._executor.flat(slot, action.reason)
-                        _notify(slot, fmt_risk_exit(
-                            slot.strategy_id, symbol,
-                            slot.entry_side, price, action.reason,
-                        ))
                         break
 
             await asyncio.sleep(self._interval)

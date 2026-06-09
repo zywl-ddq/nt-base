@@ -35,6 +35,7 @@ class OrderExecutor:
         self._submit_order = submit_order
         self._cache = cache
         self._order_factory = order_factory
+        self._pending: dict[str, dict] = {}  # client_order_id -> notification context
 
     def execute(self, slot: StrategySlot, signal: StrategySignal,
                 current_price: float) -> str:
@@ -110,10 +111,20 @@ class OrderExecutor:
         slot.last_trade_time = time.time()
 
         side_str = "LONG" if side.name == "BUY" else "SHORT"
-        _notify(slot, fmt_entry(
-            slot.strategy_id, str(self._sol_id), side_str,
-            price, float(qty), notional, reason,
-        ))
+        # Defer notification to on_fill for actual fill price
+        cid = str(order.client_order_id)
+        self._pending[cid] = {
+            "type": "entry",
+            "slot": slot,
+            "side": side_str,
+            "reason": reason,
+            "estimated_price": price,
+            "notional": notional,
+            "expected_qty": float(qty),
+            "accum_qty": 0.0,
+            "accum_notional": 0.0,
+            "created_at": time.time(),
+        }
 
     def flat(self, slot, reason=""):
         pos = self._get_position()
@@ -134,24 +145,111 @@ class OrderExecutor:
 
         entry_px = slot.entry_price if slot.has_position else float(pos.avg_px_open)
         side_was = slot.entry_side if slot.has_position else ("LONG" if pos.side.name == "LONG" else "SHORT")
-        if exit_px > 0 and entry_px > 0:
-            if side_was == "LONG":
-                pnl = float(pos.quantity.as_decimal()) * (exit_px - entry_px)
-            else:
-                pnl = float(pos.quantity.as_decimal()) * (entry_px - exit_px)
-        else:
-            pnl = 0.0
-
-        _notify(slot, fmt_close(
-            slot.strategy_id, str(self._sol_id), side_was,
-            entry_px, exit_px, pnl, slot.held_sec, reason,
-        ))
+        held_sec = slot.held_sec  # snapshot before reset
 
         slot.reset_position()
         logger.info(f"FLAT {slot.strategy_id} reason={reason}")
+
+        # Defer notification to on_fill for actual exit price
+        cid = str(order.client_order_id)
+        self._pending[cid] = {
+            "type": "close",
+            "slot": slot,
+            "side_was": side_was,
+            "entry_px": entry_px,
+            "held_sec": held_sec,
+            "reason": reason,
+            "estimated_exit_px": exit_px,
+            "expected_qty": float(pos.quantity.as_decimal()),
+            "accum_qty": 0.0,
+            "accum_notional": 0.0,
+            "created_at": time.time(),
+        }
         return True
 
     def flat_all(self, slots, reason="shutdown"):
         for s in slots:
             if s.has_position:
                 self.flat(s, reason)
+
+    # ── Fill-based notification (actual exchange prices) ──
+
+    def on_fill(self, client_order_id: str, last_px: float, last_qty: float):
+        """Called from BaseStrategy.on_order_filled. Accumulates fills and sends
+        notification with VWAP once the order is fully filled."""
+        pending = self._pending.get(client_order_id)
+        if pending is None:
+            return  # not our order, or already processed
+
+        pending["accum_qty"] += last_qty
+        pending["accum_notional"] += last_qty * last_px
+
+        # Check if fully filled (allow 1% tolerance for rounding)
+        if pending["accum_qty"] < pending["expected_qty"] * 0.99:
+            return  # wait for more fills
+
+        vwap = pending["accum_notional"] / pending["accum_qty"] if pending["accum_qty"] > 0 else last_px
+        slot = pending["slot"]
+
+        if pending["type"] == "entry":
+            # Correct slot entry price to actual fill VWAP
+            if slot.has_position and slot.entry_price != vwap:
+                slot.entry_price = vwap
+            _notify(slot, fmt_entry(
+                slot.strategy_id, str(self._sol_id), pending["side"],
+                vwap, pending["accum_qty"], pending["notional"], pending["reason"],
+            ))
+
+        elif pending["type"] == "close":
+            entry_px = pending["entry_px"]
+            qty = pending["accum_qty"]
+            if pending["side_was"] == "LONG":
+                pnl = qty * (vwap - entry_px)
+            else:
+                pnl = qty * (entry_px - vwap)
+            _notify(slot, fmt_close(
+                slot.strategy_id, str(self._sol_id), pending["side_was"],
+                entry_px, vwap, pnl, pending["held_sec"], pending["reason"],
+            ))
+
+        del self._pending[client_order_id]
+
+    def flush_pending(self):
+        """Send all pending notifications with estimated prices (shutdown fallback)."""
+        now = time.time()
+        stale = []
+        for cid, p in list(self._pending.items()):
+            if now - p["created_at"] > 10:  # 10s grace: if fill hasn't arrived by now, use estimate
+                stale.append(cid)
+                slot = p["slot"]
+                if p["type"] == "entry":
+                    px = p.get("estimated_price", 0)
+                    _notify(slot, fmt_entry(
+                        slot.strategy_id, str(self._sol_id), p["side"],
+                        px, p["expected_qty"], p["notional"], p["reason"] + " (est)",
+                    ))
+                elif p["type"] == "close":
+                    px = p.get("estimated_exit_px", 0)
+                    entry_px = p["entry_px"]
+                    qty = p["expected_qty"]
+                    if p["side_was"] == "LONG":
+                        pnl = qty * (px - entry_px) if px > 0 else 0.0
+                    else:
+                        pnl = qty * (entry_px - px) if px > 0 else 0.0
+                    _notify(slot, fmt_close(
+                        slot.strategy_id, str(self._sol_id), p["side_was"],
+                        entry_px, px, pnl, p["held_sec"], p["reason"] + " (est)",
+                    ))
+        for cid in stale:
+            del self._pending[cid]
+        if stale:
+            logger.info(f"flush_pending: sent {len(stale)} stale notifications")
+
+    def cleanup_pending(self, max_age_sec: float = 60.0):
+        """Remove pending entries older than max_age_sec (fill never arrived)."""
+        now = time.time()
+        stale = [cid for cid, p in self._pending.items() if now - p["created_at"] > max_age_sec]
+        for cid in stale:
+            logger.warning(f"cleanup_pending: fill never arrived for {cid} ({self._pending[cid]['type']})")
+            del self._pending[cid]
+        return len(stale)
