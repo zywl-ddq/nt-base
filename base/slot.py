@@ -29,6 +29,9 @@ Data Class: StrategySlot
     daily_pnl: float            cumulative daily PnL
     daily_start_equity: float   equity at start of day
     tripped: bool               circuit breaker triggered
+    highest_since_entry: float  highest price seen since entry (LONG trailing)
+    lowest_since_entry: float   lowest price seen since entry (SHORT trailing)
+    current_atr: float          latest ATR for trailing stop calculation
 
   Computed:
     held_sec: float             seconds since position opened
@@ -38,10 +41,10 @@ Invariant:
   tripped == True        =>  no new trades will be executed
 
 Author:    nt-base system
-Version:   1.1.0
+Version:   1.2.0
 """
 from __future__ import annotations
-"""StrategySlot 鈥?runtime state for a registered strategy."""
+"""StrategySlot -- runtime state for a registered strategy."""
 from dataclasses import dataclass, field
 import time
 from base.signal_protocol import SignalStrategy, BarSubscription
@@ -75,6 +78,11 @@ class StrategySlot:
     daily_start_equity: float = 0.0
     tripped: bool = False
 
+    # Tick-level price tracking for trailing stop
+    highest_since_entry: float = 0.0
+    lowest_since_entry: float = float("inf")
+    current_atr: float = 0.0
+
     @property
     def held_sec(self) -> float:
         if not self.has_position:
@@ -86,9 +94,13 @@ class StrategySlot:
         self.entry_price = 0.0
         self.entry_side = ""
         self.entry_time = 0.0
+        self.highest_since_entry = 0.0
+        self.lowest_since_entry = float("inf")
 
     def open_position(self, side: str, price: float):
         self.has_position = True
         self.entry_side = side
         self.entry_price = price
         self.entry_time = time.time()
+        self.highest_since_entry = price if side == "LONG" else 0.0
+        self.lowest_since_entry = price if side == "SHORT" else float("inf")

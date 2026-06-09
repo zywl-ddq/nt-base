@@ -1,23 +1,25 @@
 """
 Module:    risk/loop
 Purpose:   1-second risk monitoring loop. Iterates all active positions,
-           runs stop/take/hold/daily checks, triggers emergency flats.
+           runs trail/stop/take/hold/daily checks, triggers emergency flats.
 
 Class: RiskLoop
   __init__(registry, executor, interval=1.0)
-      registry: StrategyRegistry   鈥?source of active slots
-      executor: OrderExecutor      鈥?executes emergency flats
-      interval: float              鈥?check interval in seconds (default 1.0)
+      registry: StrategyRegistry    -- source of active slots
+      executor: OrderExecutor       -- executes emergency flats
+      interval: float               -- check interval in seconds (default 1.0)
 
-  update_price(symbol, price)      鈥?update latest price for a symbol
-  start() -> None                  鈥?begin the risk loop (asyncio task)
-  stop() -> None                   鈥?graceful shutdown
+  update_price(symbol, price)       -- update latest price for a symbol
+  update_atr(symbol, atr)           -- update ATR for trailing stop calc
+  start() -> None                   -- begin the risk loop (asyncio task)
+  stop() -> None                    -- graceful shutdown
 
 Execution Order (per tick, per slot):
-  1. check_daily(slot)  鈥?daily loss circuit breaker (highest priority)
-  2. check_stop(slot, price)
-  3. check_take(slot, price)
-  4. check_hold(slot, price)
+  1. check_daily(slot)   -- daily loss circuit breaker (highest priority)
+  2. check_trail(slot, price)  -- trailing stop (tick-level)
+  3. check_stop(slot, price)   -- fixed stop loss
+  4. check_take(slot, price)   -- take profit
+  5. check_hold(slot, price)   -- max hold time
 
   First check that triggers causes flat() and skip remaining checks.
   Daily trip sets slot.tripped = True (permanent disable until manual reset).
@@ -30,16 +32,15 @@ Performance:
   O(active_slots) per tick. With typical 1-3 active slots, negligible overhead.
 
 Author:    nt-base system
-Version:   1.1.0
+Version:   1.2.0
 """
 from __future__ import annotations
-'''Risk loop with Telegram notifications.'''
+'''Risk loop with tick-level exits and Telegram notifications.'''
 import asyncio
 import logging
-from risk.checker import check_stop, check_take, check_hold, check_daily
+from risk.checker import check_trail, check_stop, check_take, check_hold, check_daily
 
 logger = logging.getLogger(__name__)
-
 
 
 class RiskLoop:
@@ -50,9 +51,13 @@ class RiskLoop:
         self._running = False
         self._task = None
         self._prices: dict[str, float] = {}
+        self._atrs: dict[str, float] = {}
 
     def update_price(self, symbol: str, price: float):
         self._prices[symbol] = price
+
+    def update_atr(self, symbol: str, atr: float):
+        self._atrs[symbol] = atr
 
     async def start(self):
         self._running = True
@@ -79,13 +84,36 @@ class RiskLoop:
                 if price <= 0:
                     continue
 
+                # Update slot's ATR (use per-symbol ATR or fallback to 0.15% of price)
+                atr = self._atrs.get(symbol, 0.0)
+                # Heartbeat: log tick-level price every 60 iterations (~60s)
+                if not hasattr(self, '_hb_count'):
+                    self._hb_count = 0
+                self._hb_count += 1
+                if self._hb_count % 60 == 1:
+                    logger.info(f"RiskLoop heartbeat: price={price:.4f} "
+                                f"high={slot.highest_since_entry:.4f} "
+                                f"low={slot.lowest_since_entry:.4f} "
+                                f"atr={slot.current_atr:.4f} "
+                                f"held={slot.held_sec:.0f}s")
+                if atr > 0:
+                    slot.current_atr = atr
+
+                # Update highest/lowest since entry for trailing stop
+                if slot.has_position:
+                    if slot.entry_side == "LONG" and price > slot.highest_since_entry:
+                        slot.highest_since_entry = price
+                    elif slot.entry_side == "SHORT" and price < slot.lowest_since_entry:
+                        slot.lowest_since_entry = price
+
                 daily = check_daily(slot)
                 if daily.should_exit:
                     slot.tripped = True
                     self._executor.flat(slot, f"{daily.reason} | CB {slot.max_daily_loss_pct*100:.1f}% paused")
                     continue
 
-                for check in [check_stop, check_take, check_hold]:
+                # check_trail first (tighter than fixed stop when in profit)
+                for check in [check_trail, check_stop, check_take, check_hold]:
                     action = check(slot, price)
                     if action.should_exit:
                         self._executor.flat(slot, action.reason)

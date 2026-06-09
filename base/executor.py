@@ -123,6 +123,7 @@ class OrderExecutor:
             "expected_qty": float(qty),
             "accum_qty": 0.0,
             "accum_notional": 0.0,
+            "total_commission": 0.0,
             "created_at": time.time(),
         }
 
@@ -163,6 +164,7 @@ class OrderExecutor:
             "expected_qty": float(pos.quantity.as_decimal()),
             "accum_qty": 0.0,
             "accum_notional": 0.0,
+            "total_commission": 0.0,
             "created_at": time.time(),
         }
         return True
@@ -174,7 +176,8 @@ class OrderExecutor:
 
     # ── Fill-based notification (actual exchange prices) ──
 
-    def on_fill(self, client_order_id: str, last_px: float, last_qty: float):
+    def on_fill(self, client_order_id: str, last_px: float, last_qty: float,
+                commission: float = 0.0):
         """Called from BaseStrategy.on_order_filled. Accumulates fills and sends
         notification with VWAP once the order is fully filled."""
         pending = self._pending.get(client_order_id)
@@ -183,6 +186,7 @@ class OrderExecutor:
 
         pending["accum_qty"] += last_qty
         pending["accum_notional"] += last_qty * last_px
+        pending["total_commission"] += commission
 
         # Check if fully filled (allow 1% tolerance for rounding)
         if pending["accum_qty"] < pending["expected_qty"] * 0.99:
@@ -204,9 +208,9 @@ class OrderExecutor:
             entry_px = pending["entry_px"]
             qty = pending["accum_qty"]
             if pending["side_was"] == "LONG":
-                pnl = qty * (vwap - entry_px)
+                pnl = qty * (vwap - entry_px) - pending["total_commission"]
             else:
-                pnl = qty * (entry_px - vwap)
+                pnl = qty * (entry_px - vwap) - pending["total_commission"]
             _notify(slot, fmt_close(
                 slot.strategy_id, str(self._sol_id), pending["side_was"],
                 entry_px, vwap, pnl, pending["held_sec"], pending["reason"],
@@ -233,9 +237,9 @@ class OrderExecutor:
                     entry_px = p["entry_px"]
                     qty = p["expected_qty"]
                     if p["side_was"] == "LONG":
-                        pnl = qty * (px - entry_px) if px > 0 else 0.0
+                        pnl = qty * (px - entry_px) - p["total_commission"] if px > 0 else -p["total_commission"]
                     else:
-                        pnl = qty * (entry_px - px) if px > 0 else 0.0
+                        pnl = qty * (entry_px - px) - p["total_commission"] if px > 0 else -p["total_commission"]
                     _notify(slot, fmt_close(
                         slot.strategy_id, str(self._sol_id), p["side_was"],
                         entry_px, px, pnl, p["held_sec"], p["reason"] + " (est)",

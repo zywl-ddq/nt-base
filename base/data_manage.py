@@ -95,7 +95,14 @@ class DataManageConfig(ActorConfig, frozen=True):
 
 
 def _ns_to_dt(ns: int) -> datetime:
-    return datetime.fromtimestamp(ns / 1_000_000_000.0, tz=timezone.utc)
+    """Convert nanosecond Unix timestamp to datetime without float precision loss.
+
+    Avoids float division which drops microsecond precision for 19-digit
+    nanosecond timestamps (IEEE 754 double: ~15-16 significant digits).
+    """
+    seconds = ns // 1_000_000_000
+    micros = (ns % 1_000_000_000) // 1_000
+    return datetime.fromtimestamp(seconds, tz=timezone.utc).replace(microsecond=micros)
 
 
 _AGG_SUFFIX = {
@@ -158,6 +165,7 @@ class DataManageActor(Actor):
         self._books: dict[str, dict] = {}
         self._l2_snapshot_task: asyncio.Task | None = None
         self._oi_task: asyncio.Task | None = None
+        self._position_write_lock = asyncio.Lock()
 
     # ── lifecycle ────────────────────────────────────────────────
 
@@ -478,7 +486,8 @@ class DataManageActor(Actor):
             if isinstance(event, OrderEvent):
                 self._enqueue_order_event(event)
             elif isinstance(event, PositionEvent):
-                self._enqueue_position_event(event)
+                if self._loop:
+                    self._loop.create_task(self._enqueue_position_event(event))
         except Exception as e:
             self.log.error(f"on_event error: {e}")
 
@@ -490,7 +499,8 @@ class DataManageActor(Actor):
 
     def _on_position_event(self, event) -> None:
         try:
-            self._enqueue_position_event(event)
+            if self._loop:
+                self._loop.create_task(self._enqueue_position_event(event))
         except Exception as e:
             self.log.error(f"_on_position_event error: {e}")
 
@@ -502,11 +512,12 @@ class DataManageActor(Actor):
         self._n_order_events += 1
         self._loop.create_task(self._write_order_event(event))
 
-    def _enqueue_position_event(self, event: PositionEvent) -> None:
+    async def _enqueue_position_event(self, event: PositionEvent) -> None:
         if not self._pool or not self._loop:
             return
         self._n_position_events += 1
-        self._loop.create_task(self._write_position_event(event))
+        async with self._position_write_lock:
+            await self._write_position_event(event)
 
     async def _emit_event_row(self, level: str, kind: str, payload: dict) -> None:
         """Insert a row into events table for Telegram event_watcher to pick up."""

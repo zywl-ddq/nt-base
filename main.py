@@ -108,7 +108,8 @@ class BaseStrategy(Strategy):
         """Route NT fill events to executor for actual-fill-price notifications."""
         if self._executor:
             cid = str(event.client_order_id)
-            self._executor.on_fill(cid, float(event.last_px), float(event.last_qty))
+            commission = float(event.commission.as_decimal()) if event.commission else 0.0
+            self._executor.on_fill(cid, float(event.last_px), float(event.last_qty), commission)
 
     def on_stop(self):
         if self._risk_loop:
@@ -238,6 +239,7 @@ async def main():
             if symbol != 'SOLUSDT-PERP':
                 return
             tick_price = float(tick.price)
+            base_strat.update_price(symbol, tick_price)
             for slot in registry.all_slots():
                 if hasattr(slot.strategy, 'on_tick'):
                     slot.strategy.on_tick(
