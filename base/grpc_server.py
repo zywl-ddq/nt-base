@@ -11,6 +11,8 @@ import time
 
 import grpc
 import pandas as pd
+from base.slot import StrategySlot
+from base.signal_protocol import StrategySignal, BarSubscription
 
 import trading_base_pb2 as pb
 import trading_base_pb2_grpc as pb_grpc
@@ -18,6 +20,15 @@ from base.factor_engine import FactorEngine
 
 logger = logging.getLogger(__name__)
 
+
+
+class _GrpcSlotStrategy:
+    """Minimal SignalStrategy stub for gRPC-managed slots."""
+    def __init__(self, sid: str):
+        self.strategy_id = sid
+    def on_bar(self, bar_data): return None
+    def on_shutdown(self): pass
+    def get_diagnostics(self): return {}
 
 class TradingBaseServicer(pb_grpc.TradingBaseServicer):
     """gRPC service implementation for live trading.
@@ -29,6 +40,19 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
       4. Strategy calls SubmitSignal(signal) — base validates + executes
       5. Strategy calls Unregister or disconnects — base cleans up
     """
+
+
+    # ---- Execution context (wired by main.py after executor ready) ----
+    _executor = None
+    _registry = None
+    _get_price = None
+
+    def set_execution_context(self, executor, registry, get_price=None):
+        """Called by BaseStrategy.on_start() once the executor is ready."""
+        self._executor = executor
+        self._registry = registry
+        self._get_price = get_price
+        logger.info("gRPC execution context set")
 
     def __init__(self, db_pool=None):
         self._pool = db_pool
@@ -173,12 +197,52 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
     # ---- Signal Submission ----
 
     async def SubmitSignal(self, request: pb.Signal, context) -> pb.SignalAck:
-        """Strategy submits a trading signal. Base queues it for execution."""
-        await self._pending_signals.put(request)
+        """Strategy submits a trading signal. Execute directly if context ready."""
         direction_name = pb.Signal.Direction.Name(request.direction)
-        logger.info(f"Signal: dir={direction_name} reason={request.reason}")
-        return pb.SignalAck(accepted=True)
+        reason = request.reason
+        logger.info(f"Signal: dir={direction_name} reason={reason}")
+        await self._pending_signals.put(request)
 
+        executor = self._executor
+        registry = self._registry
+        if executor is None or registry is None:
+            return pb.SignalAck(accepted=True)
+
+        pb_dir = request.direction
+        gdir = 1 if pb_dir == 1 else (-1 if (pb_dir < 0 or pb_dir > 1) else 0)
+        price = self._get_price() if self._get_price else 0.0
+
+        for sid, info in self._strategies.items():
+            if info.get("disconnected_at"):
+                continue
+            slot = registry.get_slot(sid)
+            if slot is None:
+                cfg = info["config"]
+                subs = [BarSubscription(symbol="SOLUSDT-PERP", timeframe="1m", factors=[])]
+                slot = StrategySlot(
+                    strategy_id=sid, strategy=_GrpcSlotStrategy(sid),
+                    subscriptions=subs, stop_pct=0.03, take_pct=0.06,
+                    max_hold_sec=3600, cooldown_sec=60.0,
+                    leverage=int(cfg.max_leverage) if cfg.max_leverage else 2,
+                    position_size_pct=float(cfg.max_position_pct) if cfg.max_position_pct else 0.20,
+                    symbol="SOLUSDT-PERP",
+                    telegram_bot_token=info.get("telegram_bot_token") or "8730820649:AAGc1uH70e76480dWWcXaCrjhixmCLKDRNY",
+                    telegram_chat_id=info.get("telegram_chat_id") or "8491479697",
+                )
+                registry.register(slot)
+                logger.info(f"Slot created for gRPC strategy: {sid}")
+
+            sig = StrategySignal(direction=gdir, reason=reason)
+            if sig.direction != 0:
+                result = executor.execute(slot, sig, price)
+            elif sig.reason == "hold":
+                result = "hold"
+            else:
+                result = str(executor.flat(slot, sig.reason))
+            logger.info(f"gRPC Signal: {sid} dir={sig.direction} result={result}")
+            break
+
+        return pb.SignalAck(accepted=True)
     async def GetState(self, request: pb.StateRequest, context) -> pb.StateResponse:
         return pb.StateResponse(equity=0.0, daily_pnl=0.0, circuit_breaker=False)
 
@@ -238,6 +302,9 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
         if position_state is not None:
             bar.position.CopyFrom(position_state)
         return bar
+
+    def registered_factor_names(self) -> set:
+        return set(self._factor_engine.registered_names())
 
     def pending_signals(self) -> list[pb.Signal]:
         """Drain and return all pending signals (non-blocking)."""

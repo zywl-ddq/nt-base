@@ -18,7 +18,10 @@ logger = logging.getLogger(__name__)
 
 
 def _notify(slot: StrategySlot, text: str):
+    _lg = logging.getLogger(__name__)
+    _lg.info(f"_notify: tok={bool(slot.telegram_bot_token)} chat={bool(slot.telegram_chat_id)} tok_len={len(slot.telegram_bot_token) if slot.telegram_bot_token else 0}")
     if slot.telegram_bot_token and slot.telegram_chat_id:
+        _lg.info(f"_notify: SENDING to chat {slot.telegram_chat_id}")
         asyncio.ensure_future(
             send_message(slot.telegram_bot_token, slot.telegram_chat_id, text)
         )

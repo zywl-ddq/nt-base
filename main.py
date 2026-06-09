@@ -84,6 +84,14 @@ class BaseStrategy(Strategy):
         )
         self._risk_loop = RiskLoop(self._registry, self._executor)
         asyncio.create_task(self._risk_loop.start())
+        gs = getattr(self, "_grpc_servicer", None)
+        if gs:
+            gs.set_execution_context(
+                executor=self._executor,
+                registry=self._registry,
+                get_price=lambda: self._latest_price.get(SYMBOL, 0.0),
+            )
+            self.log.info("gRPC execution context wired")
         self.log.info("BaseStrategy started: executor + risk_loop ready")
 
     def on_stop(self):
@@ -139,10 +147,22 @@ async def main():
 
     node.build()
 
+    # Clean stale strategy registrations from previous run
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE strategy_instances SET status = 'pending' WHERE status = 'active'"
+        )
+        cleaned = int(result.split()[-1]) if result else 0
+        if cleaned:
+            logger.info(f"Cleaned {cleaned} stale strategy registration(s)")
+
     # Start gRPC server for strategy communication
     grpc_servicer = TradingBaseServicer()
     grpc_server = await start_grpc_server(grpc_servicer)
     logger.info("gRPC server started (unix:///tmp/nt_base_grpc.sock + :50051)")
+
+    # Wire gRPC servicer to base strategy for signal execution
+    base_strat._grpc_servicer = grpc_servicer
 
     reg_mgr = RegistrationManager(registry, pool, symbol="SOLUSDT-PERP", timeframe="1m")
     reg_task = asyncio.create_task(reg_mgr.run())
@@ -252,15 +272,34 @@ async def main():
                 "btc_close": _latest_btc_close if _latest_btc_close > 0 else None,
             })
 
-            slots = registry.get_slots("SOLUSDT-PERP", "1m")
             executor = base_strat.get_executor()
-            if not slots or not executor:
-                return
 
-            # Compute factors that have strategy subscribers
+            # Always push bar to gRPC strategies (don't wait for local slots)
+            if len(_bar_buffer) >= 30:
+                import pandas as pd
+                df_bar = pd.DataFrame(list(_bar_buffer))
+                df_bar["ts"] = pd.to_datetime(df_bar["ts"])
+                df_bar = df_bar.set_index("ts")
+                for col in ["delta", "taker_buy_volume", "taker_sell_volume", "btc_close"]:
+                    if col not in df_bar.columns:
+                        df_bar[col] = 0.0
+                pb_bar = grpc_servicer.build_bar(
+                    symbol=SYMBOL, ts_ns=bar.ts_event,
+                    open_p=float(bar.open), high=float(bar.high),
+                    low=float(bar.low), close=float(bar.close),
+                    volume=volume, delta=delta,
+                    taker_buy=buyer_vol, taker_sell=seller_vol,
+                    btc_close=_latest_btc_close,
+                    df_bars=df_bar,
+                )
+                grpc_servicer.push_bar(pb_bar)
+
+            # Compute factors for local + gRPC strategies
             factors = {}
             active = registry.active_factors()
-            if active and len(_bar_buffer) >= 30:
+            grpc_factors = grpc_servicer.registered_factor_names() if grpc_servicer else set()
+            all_active = active | grpc_factors
+            if all_active and len(_bar_buffer) >= 30:
                 import pandas as pd
                 df = pd.DataFrame(list(_bar_buffer))
                 df["ts"] = pd.to_datetime(df["ts"])
@@ -303,6 +342,7 @@ async def main():
 
             confidence = factors.get("trend_confidence", 0.0)
 
+            slots = registry.all_slots()
             for slot in slots:
                 bar_data = {
                     "close": float(bar.close),
