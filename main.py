@@ -293,61 +293,23 @@ async def main():
 
             executor = base_strat.get_executor()
 
-            # Always push bar to gRPC strategies (don't wait for local slots)
-            if len(_bar_buffer) >= 30:
-                import pandas as pd
-                df_bar = pd.DataFrame(list(_bar_buffer))
-                df_bar["ts"] = pd.to_datetime(df_bar["ts"])
-                df_bar = df_bar.set_index("ts")
-                for col in ["delta", "taker_buy_volume", "taker_sell_volume", "btc_close"]:
-                    if col not in df_bar.columns:
-                        df_bar[col] = 0.0
-                pb_bar = grpc_servicer.build_bar(
-                    symbol=SYMBOL, ts_ns=bar.ts_event,
-                    open_p=float(bar.open), high=float(bar.high),
-                    low=float(bar.low), close=float(bar.close),
-                    volume=volume, delta=delta,
-                    taker_buy=buyer_vol, taker_sell=seller_vol,
-                    btc_close=_latest_btc_close,
-                    df_bars=df_bar,
-                )
-                grpc_servicer.push_bar(pb_bar)
-
-            # Compute factors for local + gRPC strategies
-            factors = {}
-            active = registry.active_factors()
-            grpc_factors = grpc_servicer.registered_factor_names() if grpc_servicer else set()
-            all_active = active | grpc_factors
-            if all_active and len(_bar_buffer) >= 30:
+            # Factor computation + gRPC bar push (single unified path).
+            # FactorEngine (fed by trading-v2 via gRPC Register) is the
+            # sole factor executor — no local factor/compute.py fallback.
+            if grpc_servicer and len(_bar_buffer) >= 30:
                 import pandas as pd
                 df = pd.DataFrame(list(_bar_buffer))
                 df["ts"] = pd.to_datetime(df["ts"])
                 df = df.set_index("ts")
-
-                from factor.compute import compute_factor_history
-                for fname in active:
-                    try:
-                        result = compute_factor_history(fname, df)
-                        if isinstance(result, dict):
-                            for sub_name, sub_series in result.items():
-                                v = sub_series.dropna().iloc[-1] if len(sub_series.dropna()) > 0 else 0.0
-                                factors[sub_name] = float(v)
-                        else:
-                            val = result.dropna().iloc[-1] if len(result.dropna()) > 0 else 0.0
-                            factors[fname] = float(val)
-                    except Exception as e:
-                        logger.warning(f"factor {fname} failed: {e}")
-                        factors[fname] = 0.0
-                logger.info(f"factors computed: {factors}")
-
-                # Build and push Bar via gRPC to subscribed strategies
-                df = pd.DataFrame(list(_bar_buffer))
-                df["ts"] = pd.to_datetime(df["ts"])
-                df = df.set_index("ts")
-                # Ensure required columns exist
                 for col in ["delta", "taker_buy_volume", "taker_sell_volume", "btc_close"]:
                     if col not in df.columns:
                         df[col] = 0.0
+
+                # Compute factors once via FactorEngine
+                factors = grpc_servicer._factor_engine.execute_all(df)
+                logger.info(f"factors computed: {factors}")
+
+                # Build and push Bar with pre-computed factors
                 pb_bar = grpc_servicer.build_bar(
                     symbol=SYMBOL, ts_ns=bar.ts_event,
                     open_p=float(bar.open), high=float(bar.high),
@@ -356,8 +318,11 @@ async def main():
                     taker_buy=buyer_vol, taker_sell=seller_vol,
                     btc_close=_latest_btc_close,
                     df_bars=df,
+                    factors=factors,
                 )
                 grpc_servicer.push_bar(pb_bar)
+            else:
+                factors = {}
 
             confidence = factors.get("trend_confidence", 0.0)
 

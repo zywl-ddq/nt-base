@@ -286,10 +286,16 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
         taker_sell: float,
         btc_close: float,
         df_bars: pd.DataFrame,
+        factors: dict[str, float] | None = None,
         position_state: pb.PositionState | None = None,
     ) -> pb.Bar:
-        """Build a Bar protobuf from raw bar data + factor computation."""
-        factors = self._factor_engine.execute_all(df_bars)
+        """Build a Bar protobuf from raw bar data + factor computation.
+
+        If *factors* is None they are computed via FactorEngine;
+        pass pre-computed factors to avoid double execution.
+        """
+        if factors is None:
+            factors = self._factor_engine.execute_all(df_bars)
 
         bar = pb.Bar(
             symbol=symbol, ts_ns=ts_ns,
