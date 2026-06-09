@@ -50,6 +50,7 @@ from base.trading_node import build_trading_node
 from base.registry import StrategyRegistry
 from base.executor import OrderExecutor
 from risk.loop import RiskLoop
+from risk.tick_exit import TickExitManager
 from base.registration import RegistrationManager
 from nautilus_trader.trading.strategy import Strategy
 from nautilus_trader.model.identifiers import InstrumentId, Venue
@@ -139,6 +140,7 @@ async def main():
     from prefill_bar_buffer import prefill_bar_buffer
     _bar_buffer, _latest_btc_close = await prefill_bar_buffer(pool, 300)
     logger.info(f"Buffer pre-filled: {len(_bar_buffer)} bars, latest_btc={_latest_btc_close:.2f}")
+    _tick_exit_managers: dict[str, TickExitManager] = {}
 
     node = build_trading_node(
         api_key=cfg.binance.api_key,
@@ -231,7 +233,7 @@ async def main():
 
         dm_actor.on_trade_tick = _on_trade_tick_with_accum
 
-        # Dispatch SOL ticks to strategy slots for tick-level exits
+        # Dispatch SOL ticks to tick-level exit manager (L2 trailing, L3 breakeven)
         _original_on_tick = dm_actor.on_trade_tick
         def _on_trade_tick_with_exit_check(tick):
             _original_on_tick(tick)
@@ -240,14 +242,32 @@ async def main():
                 return
             tick_price = float(tick.price)
             base_strat.update_price(symbol, tick_price)
+
+            nonlocal _tick_exit_managers
             for slot in registry.all_slots():
-                if hasattr(slot.strategy, 'on_tick'):
-                    slot.strategy.on_tick(
+                sid = slot.strategy_id
+                if slot.has_position:
+                    tem = _tick_exit_managers.get(sid)
+                    if tem is None:
+                        tem = TickExitManager()
+                        tem.open_position(slot.entry_price, slot.entry_side == "LONG", symbol)
+                        if slot.current_atr > 0:
+                            tem.update_atr(slot.current_atr)
+                        _tick_exit_managers[sid] = tem
+                    result = tem.on_tick(
                         tick_price, float(tick.size),
                         tick.aggressor_side.name == 'BUYER',
-                        tick.ts_event,
-                        symbol,
+                        tick.ts_event, symbol,
                     )
+                    if result is not None:
+                        exc = base_strat.get_executor()
+                        exc.flat(slot, result.reason)
+                        tem.close_position()
+                        del _tick_exit_managers[sid]
+                else:
+                    if sid in _tick_exit_managers:
+                        _tick_exit_managers[sid].close_position()
+                        del _tick_exit_managers[sid]
 
         dm_actor.on_trade_tick = _on_trade_tick_with_exit_check
 
@@ -258,7 +278,7 @@ async def main():
 
             if "BTCUSDT" in iid:
                 if "1-MINUTE" in str(bar.bar_type.spec):
-                    nonlocal _latest_btc_close
+                    nonlocal _latest_btc_close, _tick_exit_managers
                     _latest_btc_close = float(bar.close)
                 return
 
@@ -292,6 +312,18 @@ async def main():
             })
 
             executor = base_strat.get_executor()
+
+            # Compute ATR from bar buffer for tick-level exits
+            import numpy as np
+            if len(_bar_buffer) >= 30:
+                recent_bars = list(_bar_buffer)[-30:]
+                highs = np.array([b['high'] for b in recent_bars], dtype=float)
+                lows = np.array([b['low'] for b in recent_bars], dtype=float)
+                _current_atr = float(np.mean(highs - lows))
+                for s in registry.all_slots():
+                    s.current_atr = _current_atr
+                for tem in _tick_exit_managers.values():
+                    tem.update_atr(_current_atr)
 
             # Factor computation + gRPC bar push (single unified path).
             # FactorEngine (fed by trading-v2 via gRPC Register) is the
@@ -340,10 +372,23 @@ async def main():
                     slot.confidence = confidence
                     if signal.direction != 0:
                         result = executor.execute(slot, signal, float(bar.close))
+                        sid = slot.strategy_id
+                        if slot.has_position:
+                            tem = _tick_exit_managers.get(sid)
+                            if tem is None:
+                                tem = TickExitManager()
+                                _tick_exit_managers[sid] = tem
+                            tem.open_position(slot.entry_price, slot.entry_side == "LONG", "SOLUSDT-PERP")
+                            if slot.current_atr > 0:
+                                tem.update_atr(slot.current_atr)
                     elif signal.reason == "hold":
                         result = "hold"
                     else:
                         result = str(executor.flat(slot, signal.reason))
+                        sid = slot.strategy_id
+                        if sid in _tick_exit_managers:
+                            _tick_exit_managers[sid].close_position()
+                            del _tick_exit_managers[sid]
                     logger.info(f"Signal: {slot.strategy_id} dir={signal.direction} reason={signal.reason} result={result}")
 
         dm_actor.on_bar = _on_bar_with_dispatch
