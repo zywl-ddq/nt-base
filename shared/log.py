@@ -32,10 +32,8 @@ def setup_logging(name: str, level: int = logging.INFO) -> logging.Logger:
 
     root.setLevel(level)
 
-    sh = logging.StreamHandler(sys.stdout)
-    sh.setFormatter(logging.Formatter(_FMT))
-    root.addHandler(sh)
-
+    # No StreamHandler: systemd redirects stdout to the same log file,
+    # so StreamHandler would cause every log line to appear twice.
     fh = logging.FileHandler(LOG_DIR / f"{name}.log")
     fh.setFormatter(logging.Formatter(_FMT))
     root.addHandler(fh)
