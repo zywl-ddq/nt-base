@@ -393,6 +393,30 @@ async def main():
                             del _tick_exit_managers[sid]
                     logger.info(f"Signal: {slot.strategy_id} dir={signal.direction} reason={signal.reason} result={result}")
 
+            # ── Cleanup orphaned strategies (disconnected past grace period) ──
+            if grpc_servicer:
+                orphans = grpc_servicer.orphaned_strategies()
+                for sid in orphans:
+                    slot = registry.get_slot(sid)
+                    if slot is None:
+                        grpc_servicer.cleanup_strategy(sid)
+                        logger.warning(f"Orphan {sid}: cleaned up (no slot)")
+                        continue
+                    if slot.has_position:
+                        executor.flat(slot, "strategy_disconnected")
+                        logger.warning(
+                            f"Orphan {sid}: flattening position ({slot.entry_side} "
+                            f"{slot.held_sec:.0f}s held) on disconnect"
+                        )
+                        # Don't cleanup yet — wait for fill to confirm close
+                    else:
+                        registry.unregister(sid)
+                        grpc_servicer.cleanup_strategy(sid)
+                        if sid in _tick_exit_managers:
+                            _tick_exit_managers[sid].close_position()
+                            del _tick_exit_managers[sid]
+                        logger.warning(f"Orphan {sid}: cleaned up (no position)")
+
         dm_actor.on_bar = _on_bar_with_dispatch
         logger.info("Bar dispatch wired: DataManageActor -> factors -> strategies -> executor")
 
