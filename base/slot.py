@@ -82,6 +82,9 @@ class StrategySlot:
     highest_since_entry: float = 0.0
     lowest_since_entry: float = float("inf")
     current_atr: float = 0.0
+    breakeven_activated: bool = False  # set by tick_exit L3 Breakeven
+
+    pending_bar_exit: str = ""  # reason for bar-initiated close, cleared on position close
 
     @property
     def held_sec(self) -> float:
@@ -90,6 +93,7 @@ class StrategySlot:
         return time.time() - self.entry_time
 
     def reset_position(self):
+        self.pending_bar_exit = ""
         self.has_position = False
         self.entry_price = 0.0
         self.entry_side = ""

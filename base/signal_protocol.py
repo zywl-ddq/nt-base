@@ -40,6 +40,7 @@ class SignalKind:
 class StrategySignal:
     direction: int    # 1=LONG, -1=SHORT, 0=FLAT
     reason: str = ""
+    position_size_pct: float = 0.0  # 0=use default, >0=override
 
 
 @dataclass

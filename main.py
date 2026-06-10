@@ -410,11 +410,12 @@ async def main():
                     elif signal.reason == "hold":
                         result = "hold"
                     else:
-                        result = str(executor.flat(slot, signal.reason))
-                        sid = slot.strategy_id
-                        if sid in _tick_exit_managers:
-                            _tick_exit_managers[sid].close_position()
-                            del _tick_exit_managers[sid]
+                        if slot.has_position:
+                            slot.pending_bar_exit = signal.reason
+                            logger.info(f"Bar exit queued: {slot.strategy_id} reason={signal.reason}")
+                            result = f"queued: {signal.reason}"
+                        else:
+                            result = "no position"
                     logger.info(f"Signal: {slot.strategy_id} dir={signal.direction} reason={signal.reason} result={result}")
 
             # ── Cleanup orphaned strategies (disconnected past grace period) ──

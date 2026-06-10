@@ -112,6 +112,14 @@ class RiskLoop:
                     self._executor.flat(slot, f"{daily.reason} | CB {slot.max_daily_loss_pct*100:.1f}% paused")
                     continue
 
+
+                # 0. Bar-submitted close task (from trading-v2 bar-level exit).
+                #    RiskLoop retries every second until position is fully closed.
+                if slot.pending_bar_exit and slot.has_position:
+                    if not self._executor.has_pending_close_for(slot):
+                        self._executor.flat(slot, slot.pending_bar_exit)
+                    continue  # skip other checks while bar exit task is pending
+
                 # check_trail first (tighter than fixed stop when in profit)
                 for check in [check_trail, check_stop, check_take, check_hold]:
                     action = check(slot, price)

@@ -50,20 +50,42 @@ class OrderExecutor:
         if pos is not None:
             currently_long = pos.side.name == "LONG"
             if currently_long == target_long:
-                # Pyramid: add to existing position (same direction).
+                # Pyramid: validate total position before adding.
                 # TickExitManager.add_position() preserves trailing state.
                 from nautilus_trader.model.enums import OrderSide
+                from decimal import Decimal
+                account = self._portfolio.account(self._venue)
+                equity = float(account.balance_total().as_decimal())
+                current_notional = self._current_position_notional()
+                max_notional = self._max_position_notional(slot)
+                req_pct = signal.position_size_pct if signal.position_size_pct > 0 else slot.position_size_pct
+                req_notional = equity * req_pct * slot.leverage
+                new_total = current_notional + req_notional
+                if new_total > max_notional:
+                    available = max(0.0, max_notional - current_notional)
+                    clipped_pct = available / (equity * slot.leverage) if equity > 0 else 0.0
+                    min_notional = equity * slot.position_size_pct * slot.leverage * 0.1
+                    if available < min_notional:
+                        return "rejected: position limit reached"
+                    logger.info(
+                        f"Pyramid clipped: {req_pct:.3f} -> {clipped_pct:.3f} "
+                        f"(current={current_notional:.2f} max={max_notional:.2f})"
+                    )
+                    size_pct = clipped_pct
+                else:
+                    size_pct = req_pct
                 self._open(OrderSide.BUY if target_long else OrderSide.SELL,
-                           current_price, slot, signal.reason)
-                return "pyramid"
+                           current_price, slot, signal.reason, size_pct_override=size_pct)
+                return f"pyramid {size_pct:.3f}"
             # Opposite direction: blocked.
             # Strategy must send a close signal first (direction=0),
             # wait for flat confirmation, then enter on a subsequent bar.
             return "rejected: reversal blocked (close first)"
         else:
             from nautilus_trader.model.enums import OrderSide
+            size_pct = signal.position_size_pct if signal.position_size_pct > 0 else None
             self._open(OrderSide.BUY if target_long else OrderSide.SELL,
-                       current_price, slot, signal.reason)
+                       current_price, slot, signal.reason, size_pct_override=size_pct)
             return f"entry {slot.entry_side}"
 
     def _create_market_order(self, instrument_id, order_side, quantity, time_in_force):
@@ -96,13 +118,41 @@ class OrderExecutor:
         scale = floor + slope * conf
         return slot.position_size_pct * scale
 
-    def _open(self, side, price, slot, reason):
+
+    # -- Position sizing validation --
+
+    def _max_position_notional(self, slot) -> float:
+        """Maximum total notional for this strategy, caps pyramid adds.
+        Uses 2x the base position_size_pct as the hard cap."""
+        from decimal import Decimal
+        account = self._portfolio.account(self._venue)
+        equity = float(account.balance_total().as_decimal())
+        max_pct = slot.position_size_pct * 2.0
+        return equity * max_pct * slot.leverage
+
+    def _current_position_notional(self) -> float:
+        """Current position notional at last price."""
+        pos = self._get_position()
+        if pos is None:
+            return 0.0
+        instr = self._cache.instrument(self._sol_id)
+        price = float(instr.last_price)
+        qty = float(pos.quantity.as_decimal())
+        return qty * price
+
+    def _open(self, side, price, slot, reason, size_pct_override=None):
         from nautilus_trader.model.enums import TimeInForce
         from decimal import Decimal
         instr = self._cache.instrument(self._sol_id)
         account = self._portfolio.account(self._venue)
         equity = float(account.balance_total().as_decimal())
-        adj_size_pct = self._adjusted_size(slot)
+        if size_pct_override is not None:
+            conf = getattr(slot, "confidence", 0.0)
+            floor = 0.25; slope = 0.75
+            scale = floor + slope * conf
+            adj_size_pct = size_pct_override * scale
+        else:
+            adj_size_pct = self._adjusted_size(slot)
         notional = equity * adj_size_pct * slot.leverage
         qty = instr.make_qty(Decimal(str(notional / float(price))))
         order = self._create_market_order(
@@ -129,6 +179,13 @@ class OrderExecutor:
             "created_at": time.time(),
         }
 
+    def has_pending_close_for(self, slot) -> bool:
+        """Check if there is already a pending close order for this slot."""
+        for p in self._pending.values():
+            if p.get("slot") is slot and p.get("type") == "close":
+                return True
+        return False
+
     def flat(self, slot, reason=""):
         pos = self._get_position()
         if pos is None:
@@ -136,6 +193,9 @@ class OrderExecutor:
         from nautilus_trader.model.enums import OrderSide, TimeInForce
         side = OrderSide.SELL if pos.side.name == "LONG" else OrderSide.BUY
         instr = self._cache.instrument(self._sol_id)
+        # Guard: don"t submit duplicate close orders for the same slot
+        if self.has_pending_close_for(slot):
+            return False
         try:
             exit_px = float(instr.last_price)
         except Exception:

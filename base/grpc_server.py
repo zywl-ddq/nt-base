@@ -222,13 +222,20 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
                 registry.register(slot)
                 logger.info(f"Slot created for gRPC strategy: {sid}")
 
-            sig = StrategySignal(direction=gdir, reason=reason)
+            sig = StrategySignal(direction=gdir, reason=reason, position_size_pct=request.position_size_pct)
             if sig.direction != 0:
                 result = executor.execute(slot, sig, price)
             elif sig.reason == "hold":
                 result = "hold"
             else:
-                result = str(executor.flat(slot, sig.reason))
+                # Queue bar-level exit as a pending task for RiskLoop to execute per-second.
+                # RiskLoop will retry every second until the position is fully closed.
+                if slot.has_position:
+                    slot.pending_bar_exit = sig.reason
+                    logger.info(f"Bar exit queued: {sid} reason={sig.reason}")
+                    result = f"queued: {sig.reason}"
+                else:
+                    result = "no position"
             logger.info(f"gRPC Signal: {sid} dir={sig.direction} result={result}")
             break
 
@@ -241,11 +248,21 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
 
     # ── Called by main loop (Bar dispatch) ─────────────────
 
-    def push_bar(self, pb_bar: pb.Bar):
-        """Push a Bar to all subscribed strategy queues."""
+    def push_bar(self, pb_bar: pb.Bar, position_states: dict | None = None):
+        """Push a Bar to all subscribed strategy queues.
+
+        If position_states is provided, each strategy receives a Bar clone
+        with its own PositionState attached, so trading-v2 knows the
+        authoritative position state (managed by nt-base tick exits).
+        """
         for sid, queue in list(self._bar_queues.items()):
+            bar_to_send = pb_bar
+            if position_states and sid in position_states:
+                bar_to_send = pb.Bar()
+                bar_to_send.CopyFrom(pb_bar)
+                bar_to_send.position.CopyFrom(position_states[sid])
             try:
-                queue.put_nowait(pb_bar)
+                queue.put_nowait(bar_to_send)
             except asyncio.QueueFull:
                 logger.warning(f"Bar queue full for {sid}, dropping")
 
