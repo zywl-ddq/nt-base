@@ -56,7 +56,7 @@ class OrderExecutor:
                 from decimal import Decimal
                 account = self._portfolio.account(self._venue)
                 equity = float(account.balance_total().as_decimal())
-                current_notional = self._current_position_notional()
+                current_notional = self._current_position_notional(current_price)
                 max_notional = self._max_position_notional(slot)
                 req_pct = signal.position_size_pct if signal.position_size_pct > 0 else slot.position_size_pct
                 req_notional = equity * req_pct * slot.leverage
@@ -130,13 +130,14 @@ class OrderExecutor:
         max_pct = slot.position_size_pct * 2.0
         return equity * max_pct * slot.leverage
 
-    def _current_position_notional(self) -> float:
+    def _current_position_notional(self, price: float = None) -> float:
         """Current position notional at last price."""
         pos = self._get_position()
         if pos is None:
             return 0.0
-        instr = self._cache.instrument(self._sol_id)
-        price = float(instr.last_price)
+        if price is None:
+            trade = self._cache.trade_tick(self._sol_id)
+            price = float(trade.price) if trade else 0.0
         qty = float(pos.quantity.as_decimal())
         return qty * price
 
@@ -186,20 +187,22 @@ class OrderExecutor:
                 return True
         return False
 
-    def flat(self, slot, reason=""):
+    def flat(self, slot, reason="", price=None):
         pos = self._get_position()
         if pos is None:
             return False
         from nautilus_trader.model.enums import OrderSide, TimeInForce
         side = OrderSide.SELL if pos.side.name == "LONG" else OrderSide.BUY
-        instr = self._cache.instrument(self._sol_id)
         # Guard: don"t submit duplicate close orders for the same slot
         if self.has_pending_close_for(slot):
             return False
-        try:
-            exit_px = float(instr.last_price)
-        except Exception:
-            exit_px = 0.0
+        if price is None:
+            try:
+                trade = self._cache.trade_tick(self._sol_id)
+                price = float(trade.price) if trade else 0.0
+            except Exception:
+                price = 0.0
+        exit_px = price
         order = self._create_market_order(
             instrument_id=self._sol_id, order_side=side,
             quantity=pos.quantity, time_in_force=TimeInForce.IOC,
