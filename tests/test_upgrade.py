@@ -1,3 +1,54 @@
+# -*- coding: utf-8 -*-
+"""
+tests/test_upgrade.py -- v2 升级功能的集成测试
+=================================================
+
+测试目标
+--------
+验证 nt-base v2 版本的新增功能和改进点：
+
+T1.1  trend_regime 因子多列输出（方向 + 置信度）
+T1.1b channel_breakout 因子（通道突破信号）
+T1.2  SignalComposer 动态权重和门控机制
+T1.3  ExitManager 自适应退出（弱趋势缩仓缩时）
+T1.4  compute_factor_history 多列因子支持
+
+测试覆盖场景
+-----------
+TestTrendRegimeV2:
+  - test_strong_uptrend：    60 根 bar 稳步上涨 -> trend_regime=1, confidence>0.5
+  - test_ranging_market：    震荡行情 -> confidence<0.5 或 signal=0
+  - test_insufficient_bars： 不足 30 根 bar -> 全零输出
+
+TestChannelBreakout:
+  - test_upside_breakout：   价格突破 20 根高位通道 -> signal=1.0
+  - test_downside_breakout： 价格跌破 20 根低位通道 -> signal=-1.0
+  - test_no_breakout：       价格在通道内 -> signal=0.0
+  - test_insufficient_bars： 不足 LOOKBACK bar -> 全零
+
+TestSignalComposerV2:
+  - test_confidence_modulation_cvd：    置信度高时 CVD 权重降低（衰减）
+  - test_gate_blocks_long_in_downtrend： 下降趋势中 LONG 信号被门控拦截
+  - test_dynamic_threshold：             低置信度时阈值升高（入场更严格）
+
+TestExitManagerV2:
+  - test_weak_trend_tight_stop：   弱趋势下止损更紧
+  - test_weak_trend_short_hold：   弱趋势下最大持仓时间缩短
+
+TestMultiColumnFactors:
+  - test_single_column_backward_compat： 单列因子保持向后兼容（返回 Series）
+  - test_multi_column_returns_dict：     多列因子返回 dict（如 trend_regime）
+
+依赖
+----
+- factor.compute.compute_factor_history：因子计算引擎
+- strategy.signal.build_signal_composer：信号合成器
+- strategy.exit_manager.ExitManager：退出管理器
+- pandas / numpy：数据处理
+
+作者: nt-base system
+版本: 2.0.0
+"""
 """Tests for nt-base v2 upgrade features."""
 import pytest
 import pandas as pd

@@ -1,3 +1,49 @@
+# -*- coding: utf-8 -*-
+"""
+tests/test_checker.py -- 风控检查函数单元测试
+================================================
+
+测试目标
+--------
+risk/checker.py 模块中的风控检查函数：
+- check_stop：   止损检查（价格向不利方向移动超过阀值）
+- check_take：   止盈检查（价格向有利方向移动超过阀值）
+- check_hold：   持仓时间检查（超时强制退出）
+- check_daily：  日亏损检查（当日亏损超过最大允许比例）
+- check_all：    一次性执行全部检查
+
+测试覆盖场景
+-----------
+TestStopLoss:
+  - test_long_stop_hit：     多头止损触发（价格跌 3%）
+  - test_long_stop_not_hit： 多头止损未触发（价格跌 2% < 3%）
+  - test_short_stop_hit：    空头止损触发（价格涨 3%）
+  - test_no_position：       无持仓时止损检查返回 False
+
+TestTakeProfit:
+  - test_long_take_hit：     多头止盈触发（价格涨 7% > 6%）
+  - test_long_take_not_hit： 多头止盈未触发（价格涨 4% < 6%）
+
+TestHoldTime:
+  - test_hold_time_not_exceeded： 未超时，不触发
+  - test_hold_time_exceeded：     超时（模拟 entry_time 提前 3700 秒）
+
+TestDailyLoss:
+  - test_daily_no_loss：          当日无亏损，不触发
+  - test_daily_loss_tripped：     当日亏损 6% > 5%，触发
+
+TestCheckAll:
+  - test_check_all_no_triggers：  所有条件检查，无触发
+  - test_check_all_trigger：      止损触发，验证返回的 kind="stop_loss"
+
+依赖
+----
+- FakeStrategy（模拟策略接口）
+- StrategySlot（创建测试用策略槽位）
+
+作者: nt-base system
+版本: 1.0.0
+"""
 """Tests for risk checker."""
 from risk.checker import check_stop, check_take, check_hold, check_daily, check_all
 from base.slot import StrategySlot

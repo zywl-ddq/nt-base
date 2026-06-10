@@ -1,3 +1,43 @@
+# -*- coding: utf-8 -*-
+"""
+pipeline_monitor.py -- 管道监控模块
+======================================
+
+功能
+----
+每 10 分钟执行一次全面的系统审计检查，通过 Telegram 发送报告。
+
+检查项
+------
+1. 服务状态：systemctl is-active nt-base
+2. 数据库状态：
+   - 活跃策略实例（strategy_instances 表中 status=active 的记录）
+   - 当前未平仓的持仓记录（positions 表中 closed_at IS NULL）
+   - 最近 10 分钟的订单活动（orders 表）
+3. 日志健康：检查 nt_base.log 最后 100 行是否包含 ERROR
+
+报告格式
+--------
+HTML 格式的 Telegram 消息，使用 emoji 标识整体健康状态：
+- 绿色：服务活跃且日志无错误
+- 红色：服务停止或检测到错误
+
+用途
+----
+- 运维巡检：无需 SSH 登录即可了解系统状态
+- 异常告警：服务中断或订单异常时的快速感知
+- 持仓跟踪：实时掌握当前持仓和订单动态
+
+运行方式
+--------
+作为一个独立进程运行（非 nt-base 主进程的一部分）：
+    python pipeline_monitor.py &
+
+或通过 systemd 管理。
+
+作者: nt-base system
+版本: 1.0.0
+"""
 import asyncio
 import asyncpg
 import subprocess

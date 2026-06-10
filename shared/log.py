@@ -1,15 +1,32 @@
+# -*- coding: utf-8 -*-
 """
-Module:    shared/log
-Purpose:   Standardized logging setup. Provides setup_logging(name) -> Logger
-           with consistent format, level, and dual output (file + console).
+shared/log.py -- 日志配置模块
+===============================
 
-Interface: setup_logging(name: str) -> logging.Logger
+功能
+----
+setup_logging(name, level) -> logging.Logger
+为指定模块名称创建统一格式的日志记录器。
 
-Output:    Logs to /root/nt-base/logs/{name}.log with rotation.
-           Format: ISO8601 timestamp [level] logger: message
+输出目标
+--------
+仅写入文件 /root/nt-base/logs/{name}.log（按文件大小轮转）。
+不添加 StreamHandler（控制台输出），原因：
+- 服务由 systemd 管理，stdout 已被 systemd 重定向到 journal
+- 若同时添加 StreamHandler，每条日志会输出两次
+- 多输出会导致日志中的 ERROR/WARNING 行数翻倍，干扰监控
 
-Author:    nt-base system
-Version:   1.0.0
+日志格式
+--------
+ISO8601 时间戳 [模块名] 级别 消息正文
+
+日志级别
+--------
+默认 INFO。对第三方库（asyncio, asyncpg, httpx, httpcore）自动降为 WARNING，
+避免底层库的调试日志干扰主流程可读性。
+
+作者: nt-base system
+版本: 1.0.0
 """
 from __future__ import annotations
 """Standard logging setup. Call setup_logging(name) in every entrypoint."""

@@ -1,3 +1,45 @@
+# -*- coding: utf-8 -*-
+"""
+tests/test_executor.py -- OrderExecutor 单元测试
+==================================================
+
+测试目标
+--------
+base/executor.py 中的 OrderExecutor 类：
+- 入场执行（LONG/SHORT 信号）
+- 同方向忽略（已有 LONG 持仓时再次收到 LONG 信号应被忽略）
+- 平仓操作（flat）
+
+测试覆盖场景
+-----------
+test_order_executor_entry_and_flat（单一集成测试用例）：
+  1. 构造 MockInstrument / MockCache / MockPortfolio / MockPosition
+     模拟 NautilusTrader 的运行环境。
+  2. 创建 OrderExecutor 和 StrategySlot，配置仓位参数
+     （20% 资金、2 倍杠杆、0 冷却时间）。
+  3. 执行 LONG 信号：
+     - 验证返回结果包含 "entry"
+     - 验证 slot 状态变为 has_position=True, entry_side="LONG"
+     - 验证 submit_order 被调用且参数格式正确
+  4. 再次发送 LONG 信号（同方向）：
+     - 验证返回 "ignored: same direction"
+     - 验证 submit_order 未被再次调用（仍是 1 次）
+  5. 执行 flat 平仓：
+     - 验证返回 True
+     - 验证 slot 状态变为 has_position=False
+     - 验证 submit_order 被调用（累计 2 次）
+
+注意事项
+--------
+- OrderExecutor 内部使用 cache.instrument().create_order() 创建订单
+  MockInstrument 的 create_order 返回字符串而非实际订单对象
+  因此断言只需验证 submit_order 被调用次数和返回值
+- slot 的 has_position 由 executor.execute() 设置，
+  flat 后由 executor.flat() 清除
+
+作者: nt-base system
+版本: 1.0.0
+"""
 """Unit tests for OrderExecutor."""
 import pytest
 from base.executor import OrderExecutor

@@ -1,3 +1,46 @@
+# -*- coding: utf-8 -*-
+"""
+tests/test_registry.py -- StrategyRegistry 单元测试
+=====================================================
+
+测试目标
+--------
+base/registry.py 中的 StrategyRegistry 类：
+- 策略注册和查询（register / get_slots / count）
+- 因子索引维护（active_factors）
+- 注销后索引清理（unregister）
+- 重复注册拒绝
+- 注销不存在的策略不报错
+
+测试覆盖场景
+-----------
+test_register_query：
+  - 注册一个策略，验证 count=1
+  - 查询 "SOLUSDT-PERP/1m" 的 slot，返回 1 个
+
+test_factor_index：
+  - 注册两个策略，分别依赖不同因子组合
+  - 验证 active_factors 返回因子的并集
+
+test_unregister_cleans_index：
+  - 注册两个策略（依赖相同因子）
+  - 注销其中一个，验证因子索引仍保留
+  - 注销另一个，验证因子索引为空
+
+test_duplicate_rejected：
+  - 同一个 strategy_id 注册两次应抛出 ValueError
+
+test_unregister_nonexistent：
+  - 注销不存在的 strategy_id 不应抛出异常
+
+依赖
+----
+- FakeStrategy（模拟策略接口）
+- BarSubscription（模拟订阅信息）
+
+作者: nt-base system
+版本: 1.0.0
+"""
 """Tests for StrategyRegistry."""
 import pytest
 from base.registry import StrategyRegistry

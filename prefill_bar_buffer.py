@@ -1,3 +1,47 @@
+# -*- coding: utf-8 -*-
+"""
+prefill_bar_buffer.py -- 启动预热模块
+========================================
+
+功能
+----
+nt-base 启动时，从 ticks 表聚合历史 1 分钟 K 线，填充到 deque 缓冲区，
+使策略在启动后立即获得足够的 bar 数据用于因子计算和信号判定。
+
+为什么需要预热？
+---------------
+- 大多数因子（如 channel_breakout 需要 20 根 bar，trend_regime 需要 30 根）
+  依赖历史窗口计算。
+- 如果冷启动，需要等待 20~30 分钟才能积累足够 bar。
+- 预热后，策略在第一根实时 bar 到达时即可生成信号。
+
+SQL 查询逻辑
+-----------
+1. SOL 条查询：从 ticks 表按分钟聚合，计算 open/high/low/close/volume
+   以及 taker_buy_volume 和 taker_sell_volume（用于 delta 计算）。
+2. BTC 条查询：取同一时间范围内 BTC 的收盘价，用于因子计算
+   （residual_momentum 依赖 btc_close）。
+3. 结果按时间升序排列（DB 中 DESC + reversed）。
+
+数据对齐策略
+-----------
+- BTC 时间戳精确匹配
+- 若某分钟缺少 BTC 数据，使用 forward-fill（前向填充）：
+  用最近一个已知 BTC 价格填补空缺，避免 NaN 传播到因子计算。
+- ts_event 时区处理：DB 中带时区，转成 tz-naive 兼容 live bar。
+
+返回格式
+--------
+collections.deque(maxlen=n_bars)
+每个元素为 dict：
+    ts, open, high, low, close, volume, delta,
+    taker_buy_volume, taker_sell_volume, btc_close
+
+同时返回 latest_btc（最后一个有效的 BTC 价格），用于初始化上下文。
+
+作者: nt-base system
+版本: 1.0.0
+"""
 """Prefill bar buffer from tick data on nt-base startup."""
 import asyncio
 import asyncpg
