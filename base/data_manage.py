@@ -600,19 +600,57 @@ class DataManageActor(Actor):
             self.log.error(f"write_order_event failed: {e}")
 
     async def _write_position_event(self, event: PositionEvent) -> None:
+        """Persist position lifecycle events to TimescaleDB.
+
+        DATA SOURCE POLICY (v2, 2026-06-10):
+        - PositionOpened:  reads from cache (pos) — cache is authoritative
+                           for the new lifecycle and no subsequent event
+                           can overwrite it yet.
+        - PositionChanged: reads from event — cache may have been updated
+                           by a subsequent PositionOpened for the same
+                           nt_position_id (NETTING reuse).
+        - PositionClosed:  reads from event — same race as PositionChanged.
+                           The event carries an immutable snapshot of the
+                           lifecycle being closed (ts_opened, ts_closed,
+                           avg_px_close, realized_pnl).
+        """
         try:
             pos = self.cache.position(event.position_id) if hasattr(self, "cache") else None
             if pos is None:
                 return
-            symbol = pos.instrument_id.symbol.value
-            side = pos.side.name  # LONG/SHORT/FLAT
-            qty = Decimal(str(pos.quantity))
-            avg_px = Decimal(str(pos.avg_px_open)) if pos.avg_px_open else None
-            realized = Decimal(str(pos.realized_pnl.as_decimal())) if pos.realized_pnl else Decimal(0)
-            unrealized = Decimal(0)  # snapshot via portfolio if needed; skip on event
-            opened_at = _ns_to_dt(pos.ts_opened)
-            closed_at = _ns_to_dt(pos.ts_closed) if pos.ts_closed else None
+
             nt_pos_id = str(event.position_id)
+            is_opened = isinstance(event, PositionOpened)
+
+            # ── Resolve data source ──────────────────────────────
+            if is_opened:
+                # Cache is safe: new lifecycle, no overwrite possible yet.
+                symbol = pos.instrument_id.symbol.value
+                side = pos.side.name
+                qty = Decimal(str(pos.quantity))
+                avg_px = Decimal(str(pos.avg_px_open)) if pos.avg_px_open else None
+                realized = Decimal(str(pos.realized_pnl.as_decimal())) if pos.realized_pnl else Decimal(0)
+                opened_at = _ns_to_dt(pos.ts_opened)
+                closed_at = None
+            else:
+                # PositionChanged / PositionClosed:
+                # Read from EVENT, not cache.  The cache may already reflect
+                # a NEW lifecycle if nt_position_id was reopened before this
+                # handler acquired the write lock.  The event carries an
+                # immutable snapshot of the lifecycle being changed/closed.
+                symbol = event.instrument_id.symbol.value
+                side = event.side.name
+                qty = Decimal(str(event.quantity))
+                avg_px = Decimal(str(event.avg_px_open)) if event.avg_px_open else None
+                if hasattr(event, 'realized_pnl') and event.realized_pnl is not None:
+                    realized = Decimal(str(event.realized_pnl.as_decimal()))
+                else:
+                    realized = Decimal(0)
+                opened_at = _ns_to_dt(event.ts_opened)
+                closed_at = _ns_to_dt(event.ts_closed) if event.ts_closed else None
+
+            unrealized = Decimal(0)  # snapshot via portfolio if needed; skip on event
+
             # Pull strategy_id from the event so per-strategy PnL queries work.
             # Pre-2026-05-23 every row had strategy_id=NULL.
             strat_id_str = str(event.strategy_id) if event.strategy_id else None
@@ -638,7 +676,7 @@ class DataManageActor(Actor):
             #                       smeared updates across reopens).
             #   PositionClosed    → UPDATE same row + set closed_at.
             async with self._pool.acquire() as conn:
-                if isinstance(event, PositionOpened):
+                if is_opened:
                     await conn.execute(
                         """
                         INSERT INTO positions
@@ -681,16 +719,19 @@ class DataManageActor(Actor):
                     "strategy_id": str(event.strategy_id) if event.strategy_id else None,
                 })
             elif isinstance(event, PositionClosed):
+                # Read duration from event (immutable snapshot), not cache
+                evt_closed = event.ts_closed or 0
+                evt_opened = event.ts_opened or 0
                 duration = (
-                    (pos.ts_closed - pos.ts_opened) / 1_000_000_000
-                    if pos.ts_closed and pos.ts_opened else 0
+                    (evt_closed - evt_opened) / 1_000_000_000
+                    if evt_closed and evt_opened else 0
                 )
                 await self._emit_event_row("INFO", "position_close", {
                     "symbol": symbol,
-                    "side_was": pos.entry.name if hasattr(pos, "entry") and pos.entry else None,
-                    "qty_peak": str(pos.peak_qty.as_decimal()) if hasattr(pos, "peak_qty") else None,
-                    "avg_open": str(pos.avg_px_open) if pos.avg_px_open else None,
-                    "avg_close": str(pos.avg_px_close) if hasattr(pos, "avg_px_close") and pos.avg_px_close else None,
+                    "side_was": event.entry.name if hasattr(event, "entry") and event.entry else None,
+                    "qty_peak": str(Decimal(str(event.peak_qty))) if event.peak_qty else None,
+                    "avg_open": str(Decimal(str(event.avg_px_open))) if event.avg_px_open else None,
+                    "avg_close": str(Decimal(str(event.avg_px_close))) if event.avg_px_close else None,
                     "realized_pnl": str(realized),
                     "duration_sec": round(duration, 1),
                     "strategy_id": str(event.strategy_id) if event.strategy_id else None,

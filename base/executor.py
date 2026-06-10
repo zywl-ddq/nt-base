@@ -50,13 +50,16 @@ class OrderExecutor:
         if pos is not None:
             currently_long = pos.side.name == "LONG"
             if currently_long == target_long:
-                return "ignored: same direction"
-            self.flat(slot, signal.reason)
-            if signal.direction != 0:
+                # Pyramid: add to existing position (same direction).
+                # TickExitManager.add_position() preserves trailing state.
                 from nautilus_trader.model.enums import OrderSide
                 self._open(OrderSide.BUY if target_long else OrderSide.SELL,
                            current_price, slot, signal.reason)
-            return "reversed" if signal.direction != 0 else "flatted"
+                return "pyramid"
+            # Opposite direction: blocked.
+            # Strategy must send a close signal first (direction=0),
+            # wait for flat confirmation, then enter on a subsequent bar.
+            return "rejected: reversal blocked (close first)"
         else:
             from nautilus_trader.model.enums import OrderSide
             self._open(OrderSide.BUY if target_long else OrderSide.SELL,

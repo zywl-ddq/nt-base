@@ -73,6 +73,20 @@ class TickExitManager:
         self._symbol = ''
         self._trade_window.clear()
 
+    def add_position(self, entry_price: float):
+        """Pyramid add: update VWAP entry price without resetting
+        trailing state (_highest_tick, _lowest_tick, _breakeven_activated).
+
+        Called when adding to an existing same-direction position.
+        The original favorable price extreme is preserved so the trailing
+        stop continues to protect the entire position, not just the new lot.
+        """
+        self._entry_price = entry_price
+        # Deliberately do NOT reset:
+        #   _highest_tick / _lowest_tick (trailing stop anchor)
+        #   _breakeven_activated
+        #   _trade_window
+
     def update_atr(self, atr: float):
         self._current_atr = atr
 

@@ -53,6 +53,7 @@ from risk.loop import RiskLoop
 from risk.tick_exit import TickExitManager
 from nautilus_trader.trading.strategy import Strategy
 from nautilus_trader.model.identifiers import InstrumentId, Venue
+import trading_base_pb2 as pb
 
 # gRPC server (strategy communication)
 from base.grpc_server import TradingBaseServicer, start_grpc_server
@@ -354,7 +355,24 @@ async def main():
                     df_bars=df,
                     factors=factors,
                 )
-                grpc_servicer.push_bar(pb_bar)
+                # Build per-strategy position states so trading-v2
+                # knows the authoritative position (managed by nt-base tick exits)
+                position_states = {}
+                for slot in registry.all_slots():
+                    if slot.has_position:
+                        side = pb.PositionState.LONG if slot.entry_side == "LONG" else pb.PositionState.SHORT
+                        ps = pb.PositionState(
+                            side=side,
+                            entry_price=slot.entry_price,
+                            bars_held=int(slot.held_sec / 60),
+                            highest_price=slot.highest_since_entry,
+                            lowest_price=slot.lowest_since_entry,
+                            current_atr=slot.current_atr,
+                            breakeven_activated=getattr(slot, "breakeven_activated", False),
+                        )
+                        position_states[slot.strategy_id] = ps
+
+                grpc_servicer.push_bar(pb_bar, position_states=position_states)
             else:
                 factors = {}
 
@@ -373,6 +391,7 @@ async def main():
                 if signal is not None:
                     slot.confidence = confidence
                     if signal.direction != 0:
+                        was_in_position = slot.has_position
                         result = executor.execute(slot, signal, float(bar.close))
                         sid = slot.strategy_id
                         if slot.has_position:
@@ -380,7 +399,12 @@ async def main():
                             if tem is None:
                                 tem = TickExitManager()
                                 _tick_exit_managers[sid] = tem
-                            tem.open_position(slot.entry_price, slot.entry_side == "LONG", "SOLUSDT-PERP")
+                            if was_in_position and result == "pyramid":
+                                # Pyramid add: only update VWAP, preserve trailing anchors
+                                tem.add_position(slot.entry_price)
+                            else:
+                                # First entry: full position initialization
+                                tem.open_position(slot.entry_price, slot.entry_side == "LONG", "SOLUSDT-PERP")
                             if slot.current_atr > 0:
                                 tem.update_atr(slot.current_atr)
                     elif signal.reason == "hold":
