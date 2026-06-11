@@ -696,7 +696,16 @@ async def start_grpc_server(
     返回：
       grpc.aio.Server 实例，由 main.py 持有引用以优雅关闭
     """
-    server = grpc.aio.server()
+    server = grpc.aio.server(options=[
+        # gRPC keepalive — detect dead connections within ~40s (30s ping + 10s timeout)
+        ("grpc.keepalive_time_ms", 30000),
+        ("grpc.keepalive_timeout_ms", 10000),
+        ("grpc.keepalive_permit_without_calls", True),
+        # Allow client pings (min interval 5s)
+        ("grpc.http2.min_recv_ping_interval_without_data_ms", 5000),
+        # Close connection after 2 failed pings
+        ("grpc.http2.max_ping_strikes", 2),
+    ])
 
     # 将 TradingBaseServicer 挂载到 gRPC 服务器
     pb_grpc.add_TradingBaseServicer_to_server(servicer, server)
