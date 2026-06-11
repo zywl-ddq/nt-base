@@ -352,7 +352,7 @@ class OrderExecutor:
         from decimal import Decimal
         account = self._portfolio.account(self._venue)
         equity = float(account.balance_total().as_decimal())
-        max_pct = slot.position_size_pct * 2.0
+        max_pct = self._adjusted_size(slot) * 2.0
         return equity * max_pct * slot.leverage
 
     def _current_position_notional(self, price: float = None) -> float:

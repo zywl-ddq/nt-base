@@ -63,6 +63,7 @@ from pathlib import Path                    # 跨平台路径处理
 # 将项目根目录（main.py 所在目录）加入 Python 模块搜索路径
 # 这样 base/、shared/、risk/ 等子包可以直接 import
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, "/root/trading-v2/factors")
 
 # —— 内部模块导入 -----------------------------------------------------------------
 
@@ -763,9 +764,9 @@ async def main():
             #   - Tick 级退出的 Trailing Stop 宽度
             #   - 动态止盈止损距离
             #
-            from base.atr import compute_atr
+            from utils import atr
             if len(_bar_buffer) >= 30:
-                _current_atr = compute_atr(list(_bar_buffer), period=30)
+                import pandas as _pd_atr; _atr_df = _pd_atr.DataFrame(list(_bar_buffer)); _current_atr = float(atr(_atr_df, period=30).iloc[-1])
 
                 # 将 ATR 同步给所有策略 slot
                 for s in registry.all_slots():

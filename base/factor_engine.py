@@ -73,6 +73,12 @@ import logging
 import numpy as np
 import pandas as pd
 
+import sys
+sys.path.insert(0, "/root/trading-v2/factors")
+from utils import ema, atr, volume_ratio
+
+import sys
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -89,6 +95,7 @@ logger = logging.getLogger(__name__)
 # - 每次 exec 时通过 {**_SAFE_BUILTINS, ...} 展开到命名空间中
 # ---------------------------------------------------------------------------
 _SAFE_BUILTINS = {
+    "ema": ema,             # EMA
     # ---- 数学与数值操作 ----
     "abs": abs,
     "all": all,
