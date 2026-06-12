@@ -790,6 +790,7 @@ async def main():
             #   5. 通过 gRPC push_bar 推送给所有已注册客户端
             #
             # 仅当 buffer 长度 >= 30（有足够的 bar 计算因子）且 grpc_servicer 就绪时执行
+            position_states = {}
             if grpc_servicer and len(_bar_buffer) >= 30:
                 import pandas as pd
 
@@ -885,7 +886,12 @@ async def main():
                     "low": float(bar.low),         # 当前最低价
                     "ts_ns": bar.ts_event,         # 时间戳
                     "factors": factors,            # 所有因子值
+                    "btc_close": _latest_btc_close if _latest_btc_close > 0 else float(bar.close),
                 }
+                # 添加 PositionState（供 AlphaSignal.on_bar 获取持仓状态）
+                ps = position_states.get(slot.strategy_id) if position_states else None
+                if ps is not None:
+                    bar_data["position"] = ps
 
                 # 调用策略的 on_bar 方法获取信号
                 # 注意：这里调用的 strategy 是在 trading-v2 注册时

@@ -139,15 +139,16 @@ class V2SignalAdapter:
         delta_buy = float(bar_data.get("delta_buy", 0.0))
         delta_sell = float(bar_data.get("delta_sell", 0.0))
 
-        # Get ATR from bar_data (computed by nt-base main.py)
-        atr = float(bar_data.get("atr", 0.0))
+        # ── position ────────────────────────────────────────────
+        # nt-base 构建的 PositionState protobuf（包含持仓方向、开仓价、ATR 等）
+        position = bar_data.get("position")
 
         # ── 调用策略代码 ────────────────────────────────────────
         result = self._signal.on_bar(
             close=close, high=high, low=low,
             delta_buy_vol=delta_buy, delta_sell_vol=delta_sell,
             btc_close=btc_close, ts_ns=ts_ns,
-            atr=atr,
+            position=position,
         )
 
         if result is None:
