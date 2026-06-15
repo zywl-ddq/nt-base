@@ -117,7 +117,7 @@ class TickExitManager:
                  toxic_vol_threshold: float = 500.0,
                  toxic_ratio: float = 5.0,
                  trail_atr_mult: float = 4.0,
-                 breakeven_atr_mult: float = 1.5,
+                 breakeven_atr_mult: float = 3.0,
                  breakeven_fee_pct: float = 0.001,
                  ):
         # ---- Toxic Flow 参数 ----

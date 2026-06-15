@@ -226,6 +226,12 @@ class StrategySlot:
        当价格朝有利方向波动超过一定幅度后，
        将止损位上移至入场价，确保至少保本出场。"""
 
+    entry_commission: float = 0.0
+    """入场累计手续费（浮点数），以 USDT 计价。
+       由 OrderExecutor.on_fill() 在入场成交确认时记录。
+       平仓计算盈亏时从 slot 读取以得到双边手续费后的净盈亏。
+       在 reset_position() 时重置为 0.0。"""
+
     # =========================================================================
     # 【运行时状态】-- Bar 级退出请求
     # =========================================================================
@@ -303,6 +309,7 @@ class StrategySlot:
         self.entry_time = 0.0
         self.highest_since_entry = 0.0
         self.lowest_since_entry = float("inf")
+        self.entry_commission = 0.0
 
     def open_position(self, side: str, price: float):
         """设置开仓状态，初始化所有价格跟踪字段。

@@ -161,6 +161,7 @@ class BaseStrategy(Strategy):
             submit_order=self.submit_order,
             cache=self.cache,
             order_factory=self.order_factory,
+            cancel_order=self.cancel_order,  # [maker] 撤单回调
         )
 
         # 创建风控循环（1秒间隔），传入注册表和执行器
@@ -515,6 +516,8 @@ async def main():
 
     # 开始 monkey-patch（前提是成功找到了 dm_actor）
     if dm_actor:
+        # 注入 BaseStrategy 引用，供 data_manage 落库时按 cid 反查策略实例
+        dm_actor.bind_base_strategy(base_strat)
 
         # —— Monkey-patch 前置: 保存原始方法引用 -----------------------------------
         # 保存原始的 on_bar 和 on_trade_tick 方法引用
@@ -647,8 +650,10 @@ async def main():
                         # 调用执行器平仓
                         exc = base_strat.get_executor()
                         exc.flat(slot, result.reason)   # reason 包含退出原因
-                        tem.close_position()             # 关闭 TickExitManager
-                        del _tick_exit_managers[sid]     # 从管理字典中移除
+                        tem.close_position()             # 关闭 TickExitManager(in_position=False -> 后续 on_tick 返回 None)
+                        # [P3 修复] 不 del tem:保留已 close 的 TickExitManager,
+                        # 防止下个 tick 重建 tem 在 slot.has_position 仍 True 时重复 flat。
+                        # tem 在 slot.reset_position()(on_fill 确认平仓)后由 else 分支清理。
                 else:
                     # —— 此策略无仓位 ------------------------------------------------
                     # 如果还持有 TickExitManager（理论上不应该），清理掉

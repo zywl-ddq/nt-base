@@ -208,6 +208,7 @@ class DataManageActor(Actor):
         self._l2_snapshot_task: asyncio.Task | None = None     # L2 快照循环任务
         self._oi_task: asyncio.Task | None = None              # OI 轮询循环任务
         self._position_write_lock = asyncio.Lock()             # 持仓写入互斥锁
+        self._base_strategy = None  # BaseStrategy 引用（bind_base_strategy 注入），落库时按 cid 反查 instance
 
     # ═══════════════════════════════════════════════════════════
     # 生命周期
@@ -320,6 +321,9 @@ class DataManageActor(Actor):
             self.log.error(f"DataManage pool init failed: {e}")
             return
 
+        # 启动对账：清理上次运行残留的僵尸仓位（sandbox 重启 NT cache 必空）
+        await self._reconcile_startup_positions()
+
         # 启动各后台循环
         self._flush_task = self._loop.create_task(self._flush_loop())
         self._funding_task = self._loop.create_task(self._funding_poll_loop())
@@ -327,6 +331,29 @@ class DataManageActor(Actor):
             self._l2_snapshot_task = self._loop.create_task(self._l2_snapshot_loop())
         if self._cfg.collect_oi:
             self._oi_task = self._loop.create_task(self._oi_poll_loop())
+
+    async def _reconcile_startup_positions(self) -> None:
+        """启动对账：sandbox 重启后 NT cache 必空，DB 中残留的 closed_at IS NULL
+        仓位已无实际头寸（NT 不会再发 PositionClosed）。标记关闭，防止僵尸累积。
+
+        前提：sandbox SandboxExecutionClient 非持久化，重启 cache 清空。
+        本方法在 _async_init 早期（pool ready 后、任何交易前）执行，此时
+        closed_at IS NULL 全是上次运行的残留。
+        """
+        if not self._pool:
+            return
+        try:
+            async with self._pool.acquire() as conn:
+                status = await conn.execute(
+                    "UPDATE positions SET closed_at = now(), "
+                    "raw = COALESCE(raw, '{}'::jsonb) || "
+                    "jsonb_build_object('reconcile', 'startup_orphan', "
+                    "'note', 'closed at startup: NT cache lost on restart') "
+                    "WHERE closed_at IS NULL"
+                )
+            self.log.info(f"startup reconcile: {status}")
+        except Exception as e:
+            self.log.error(f"startup reconcile failed: {e}")
 
     # ═══════════════════════════════════════════════════════════
     # 资金费率轮询 (两级)
@@ -624,6 +651,20 @@ class DataManageActor(Actor):
         async with self._position_write_lock:
             await self._write_position_event(event)
 
+    def bind_base_strategy(self, base_strat) -> None:
+        """注入 BaseStrategy 引用；落库时按 cid 反查策略实例（延迟取 executor，避开 on_start 时序）。"""
+        self._base_strategy = base_strat
+
+    def _instance_for_order(self, cid) -> str | None:
+        """client_order_id -> 策略实例ID（AlphaV2-005/MacroV3-001）。无映射或未注入时返回 None。"""
+        if not cid or not self._base_strategy:
+            return None
+        try:
+            ex = self._base_strategy.get_executor()
+            return ex.instance_for_cid(str(cid)) if ex else None
+        except Exception:
+            return None
+
     async def _emit_event_row(self, level: str, kind: str, payload: dict) -> None:
         """向 events 表插入一行事件记录，供 Telegram 事件监听器拾取。
 
@@ -669,18 +710,22 @@ class DataManageActor(Actor):
             ts_sub = _ns_to_dt(order.ts_init)
             ts_upd = _ns_to_dt(event.ts_event)
 
+            # 按 client_order_id 反查策略实例（AlphaV2-005/MacroV3-001）
+            inst = self._instance_for_order(event.client_order_id)
             # ── 写入 orders 表 ──────────────────────────────────────
             async with self._pool.acquire() as conn:
                 await conn.execute(
                     """
-                    INSERT INTO orders (order_id, client_id, symbol, side, type,
+                    INSERT INTO orders (order_id, client_id, instance_id, symbol, side, type,
                                          quantity, price, status, ts_submitted, ts_updated, raw)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
                     ON CONFLICT (order_id) DO UPDATE SET
                        status=EXCLUDED.status, ts_updated=EXCLUDED.ts_updated,
-                       price=COALESCE(EXCLUDED.price, orders.price), raw=EXCLUDED.raw
+                       price=COALESCE(EXCLUDED.price, orders.price),
+                       instance_id=COALESCE(EXCLUDED.instance_id, orders.instance_id),
+                       raw=EXCLUDED.raw
                     """,
-                    order_id, str(event.strategy_id) if event.strategy_id else None,
+                    order_id, str(event.strategy_id) if event.strategy_id else None, inst,
                     symbol, side, otype, qty, price, status, ts_sub, ts_upd,
                     _safe_json({"event": type(event).__name__, "ts": ts_upd.isoformat()}),
                 )
@@ -714,6 +759,7 @@ class DataManageActor(Actor):
                     "notional": str(fill_qty * fill_price),
                     "fee": str(fee),
                     "fee_ccy": fee_ccy,
+                    "instance_id": inst,
                     "strategy_id": str(event.strategy_id) if event.strategy_id else None,
                     "liquidity": event.liquidity_side.name if event.liquidity_side else None,
                 })
@@ -782,6 +828,14 @@ class DataManageActor(Actor):
                 if tail.isdigit():
                     strat_db_id = int(tail)
 
+            # 反查策略实例：开仓单 cid（PositionOpened）/ 平仓单 cid（PositionClosed）
+            if isinstance(event, PositionOpened):
+                _inst = self._instance_for_order(getattr(event, "opening_order_id", None))
+            elif isinstance(event, PositionClosed):
+                _inst = self._instance_for_order(getattr(event, "closing_order_id", None))
+            else:
+                _inst = None
+
             # ── 写入数据库 ──────────────────────────────────────────
             # NETTING 陷阱：同一 NT position_id 每次 FLAT 后重用。
             # PositionOpened 触发新的生命周期，所以用 (nt_position_id, opened_at)
@@ -792,17 +846,18 @@ class DataManageActor(Actor):
                         """
                         INSERT INTO positions
                             (nt_position_id, symbol, strategy_id, side,
-                             quantity, avg_price, realized_pnl, opened_at, raw)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
+                             quantity, avg_price, realized_pnl, opened_at, instance_id, raw)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)
                         ON CONFLICT (nt_position_id, opened_at)
                         DO UPDATE SET
                             side=EXCLUDED.side,
                             quantity=EXCLUDED.quantity,
                             avg_price=EXCLUDED.avg_price,
-                            realized_pnl=EXCLUDED.realized_pnl
+                            realized_pnl=EXCLUDED.realized_pnl,
+                            instance_id=COALESCE(EXCLUDED.instance_id, positions.instance_id)
                         """,
                         nt_pos_id, symbol, strat_db_id, side,
-                        qty, avg_px, realized, opened_at,
+                        qty, avg_px, realized, opened_at, _inst,
                         _safe_json({"position_id": nt_pos_id,
                                     "event": "PositionOpened"}),
                     )
@@ -827,6 +882,7 @@ class DataManageActor(Actor):
                     "side": side,
                     "qty": str(qty),
                     "avg_price": str(avg_px) if avg_px else None,
+                    "instance_id": _inst,
                     "strategy_id": str(event.strategy_id) if event.strategy_id else None,
                 })
             elif isinstance(event, PositionClosed):
@@ -844,6 +900,7 @@ class DataManageActor(Actor):
                     "avg_close": str(Decimal(str(event.avg_px_close))) if event.avg_px_close else None,
                     "realized_pnl": str(realized),
                     "duration_sec": round(duration, 1),
+                    "instance_id": _inst,
                     "strategy_id": str(event.strategy_id) if event.strategy_id else None,
                 })
         except Exception as e:

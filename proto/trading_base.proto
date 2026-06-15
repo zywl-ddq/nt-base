@@ -84,6 +84,7 @@ message Signal {
   int64 bar_ts_ns = 3;
   optional ExitConditions exit = 10;
   double position_size_pct = 11;
+  string strategy_id = 12;
 }
 
 message ExitConditions {

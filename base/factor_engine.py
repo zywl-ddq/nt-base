@@ -180,7 +180,7 @@ class FactorEngine:
         # _factors: 因子存储字典，key=因子名称，value={code, params, compiled}
         self._factors: dict[str, dict] = {}
 
-    def register(self, name: str, code: str, params: dict[str, float] | None = None):
+    def register(self, name: str, code: str, params: dict[str, float] | None = None, timescale: str = "1min"):
         """
         注册或更新一个因子。
 
@@ -222,6 +222,7 @@ class FactorEngine:
 
         # 存储因子信息：保留原始源码（可用于调试/展示）+ 参数 + 编译后字节码
         self._factors[name] = {
+            "timescale": timescale,
             "code": code,
             "params": params or {},       # 如果 params 为 None，使用空 dict
             "compiled": compiled,
@@ -375,7 +376,13 @@ class FactorEngine:
                     sig = inspect.signature(obj)
                     kwargs = {"df": namespace["df"]}
                     if "timescale" in sig.parameters:
-                        kwargs["timescale"] = "1min"
+                        # 使用 meta 中存储的 timescale；若为默认 "1min" 则回退到函数签名默认值
+                        ts = meta.get("timescale", "1min")
+                        if ts == "1min" and "timescale" in sig.parameters:
+                            ts_default = sig.parameters["timescale"].default
+                            if ts_default is not inspect.Parameter.empty and ts_default != "1min":
+                                ts = ts_default
+                        kwargs["timescale"] = ts
                     result = obj(**kwargs)
                     if isinstance(result, pd.Series) and not result.empty:
                         val = result.dropna()
@@ -491,7 +498,13 @@ class FactorEngine:
                     sig = inspect.signature(obj)
                     kwargs = {"df": namespace["df"]}
                     if "timescale" in sig.parameters:
-                        kwargs["timescale"] = "1min"
+                        # 使用 meta 中存储的 timescale；若为默认 "1min" 则回退到函数签名默认值
+                        ts = meta.get("timescale", "1min")
+                        if ts == "1min" and "timescale" in sig.parameters:
+                            ts_default = sig.parameters["timescale"].default
+                            if ts_default is not inspect.Parameter.empty and ts_default != "1min":
+                                ts = ts_default
+                        kwargs["timescale"] = ts
                     result = obj(**kwargs)
                     if isinstance(result, pd.Series):
                         # pd.to_numeric 确保所有值为数值类型，非数值设为 NaN

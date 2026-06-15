@@ -191,6 +191,7 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
                     name=fd.name,
                     code=fd.code,
                     params=dict(fd.params) if fd.params else None,
+                    timescale=fd.timescale if fd.timescale else "1min",
                 )
             except SyntaxError as e:
                 # 因子代码语法错误，立即返回失败
@@ -400,8 +401,13 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
         gdir = 1 if pb_dir == 1 else (-1 if (pb_dir < 0 or pb_dir > 1) else 0)
         price = self._get_price() if self._get_price else 0.0
 
-        # 遍历所有已注册策略（目前预期单策略，循环 break 确保只处理一次）
-        for sid, info in self._strategies.items():
+        # [多策略修复] 按信号来源 strategy_id 精确路由（不再遍历所有策略）
+        sid = request.strategy_id
+        info = self._strategies.get(sid)
+        if info is None:
+            logger.warning(f"SubmitSignal 未注册策略: {sid}")
+            return pb.SignalAck(accepted=False, reject_reason=f"unknown strategy {sid}")
+        for sid, info in [(sid, info)]:
             if info.get("disconnected_at"):
                 # 策略已断连，跳过信号处理
                 continue

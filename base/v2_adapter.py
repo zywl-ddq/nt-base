@@ -154,7 +154,7 @@ class V2SignalAdapter:
         if result is None:
             return None
         # 两个项目都使用 @dataclass StrategySignal(direction, reason) —— 结构兼容
-        return StrategySignal(direction=result.direction, reason=result.reason)
+        return StrategySignal(direction=result.direction, reason=result.reason, position_size_pct=result.position_size_pct)
 
     def on_tick(self, price, size, is_buyer, ts_ns, symbol=""):
         """委托到 AlphaSignal.on_tick (如果存在)。"""

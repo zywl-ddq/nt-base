@@ -72,7 +72,7 @@ class OrderExecutor:
         _pending (dict): 待确认订单上下文字典，key=client_order_id, value=通知上下文
     """
 
-    def __init__(self, sol_id, venue, portfolio, submit_order, cache, order_factory=None):
+    def __init__(self, sol_id, venue, portfolio, submit_order, cache, order_factory=None, cancel_order=None, clock=None):
         """初始化 OrderExecutor。
 
         所有依赖均由外部注入（依赖倒置原则），便于单元测试和替换实现。
@@ -105,11 +105,16 @@ class OrderExecutor:
         self._submit_order = submit_order
         self._cache = cache
         self._order_factory = order_factory
+        self._cancel_order = cancel_order  # [maker] cancel callback (main injects Strategy.cancel_order)
+        self._clock = clock                # [maker] clock (reserved, timeout uses asyncio)
         # _pending 字典：存储已提交但尚未收到 fill 确认的订单上下文。
         # key = client_order_id (字符串)，value = 包含通知所需全部信息的字典。
         # 当 on_fill() 回调返回时，使用真实成交价 VWAP 发送 Telegram 通知。
         # 这是 deferred（延迟）通知机制的核心数据结构。
         self._pending: dict[str, dict] = {}  # client_order_id -> notification context
+        # cid -> instance_id 长生命周期映射（不随 _pending 删除），
+        # 供 data_manage 落库时按 client_order_id 反查策略实例。
+        self._cid_instance: dict[str, str] = {}
 
     def execute(self, slot: StrategySlot, signal: StrategySignal,
                 current_price: float) -> str:
@@ -166,71 +171,12 @@ class OrderExecutor:
         pos = self._get_position()
 
         if pos is not None:
-            # ── 有持仓的情况 ──
-            # 判断当前持仓方向
-            currently_long = pos.side.name == "LONG"
-
-            if currently_long == target_long:
-                # ── 同向 → Pyramid 加仓逻辑 ──
-                # Pyramid（金字塔加仓）允许在已有盈利仓位的基础上继续加码。
-                # 需要验证总仓位是否超过上限，超出时自动裁剪（clip）。
-                #
-                # 为什么要保留 Pyramid 能力？
-                # - 强趋势行情中，分批入场可以摊薄成本或加厚盈利
-                # - TickExitManager 的 add_position() 会维护 trailing stop 状态，
-                #   加仓时不会丢失已有的 trailing 信息
-                from nautilus_trader.model.enums import OrderSide
-                from decimal import Decimal
-
-                # 获取账户权益（总资产净值）
-                account = self._portfolio.account(self._venue)
-                equity = float(account.balance_total().as_decimal())
-
-                # 当前持仓名义价值（持仓量 * 当前价格）
-                current_notional = self._current_position_notional(current_price)
-
-                # 最大允许名义价值（仓位上限）：2x 基础仓位比例
-                max_notional = self._max_position_notional(slot)
-
-                # 请求加仓的仓位比例：优先使用信号指定的比例，否则用 slot 默认值
-                req_pct = signal.position_size_pct if signal.position_size_pct > 0 else slot.position_size_pct
-                # 请求加仓的名义价值
-                req_notional = equity * req_pct * slot.leverage
-
-                # 新总名义价值 = 当前持仓 + 新增仓位
-                new_total = current_notional + req_notional
-
-                # ── Pyramid 裁剪算法 ──
-                # 如果 new_total 超过 max_notional，需要裁剪：
-                # 1. 计算剩余可用额度 available = max - current
-                # 2. 将 available 转为仓位比例（clipped_pct）
-                # 3. 如果 available < 最小仓位（base_pct * 10%），直接拒绝
-                if new_total > max_notional:
-                    available = max(0.0, max_notional - current_notional)
-                    clipped_pct = available / (equity * slot.leverage) if equity > 0 else 0.0
-                    # 最小允许仓位：基础仓位大小的 10%，防止微仓
-                    min_notional = equity * slot.position_size_pct * slot.leverage * 0.1
-                    if available < min_notional:
-                        return "rejected: position limit reached"
-                    logger.info(
-                        f"Pyramid clipped: {req_pct:.3f} -> {clipped_pct:.3f} "
-                        f"(current={current_notional:.2f} max={max_notional:.2f})"
-                    )
-                    size_pct = clipped_pct
-                else:
-                    size_pct = req_pct
-
-                # 执行加仓（同向，不改变方向）
-                self._open(OrderSide.BUY if target_long else OrderSide.SELL,
-                           current_price, slot, signal.reason, size_pct_override=size_pct)
-                return f"pyramid {size_pct:.3f}"
-
-            # ── 反向信号 → 被拦截 ──
-            # 如果已有持仓但收到反向信号，不会自动平仓再开反向仓。
-            # 策略必须先发送 direction=0（close 信号），等 flat() 完成后，
-            # 在下一根 bar 的信号中再决定是否反向入场。
-            # 这么设计的目的是防止信号在单根 bar 内剧烈反转导致频繁开平仓。
-            return "rejected: reversal blocked (close first)"
+            # ── 有持仓 → 拒绝所有新入场（max_concurrent = 1）──
+            # 策略必须先发送 direction=0（close 信号）平仓，
+            # 等 flat() 完成后才能在后续 bar 中重新入场。
+            # 此限制替代了原来的 Pyramid 加仓和反向拦截逻辑，
+            # 确保任何时候最多只有 1 个净持仓。
+            return "rejected: position exists (max_concurrent=1)"
 
         else:
             # ── 无持仓 → 正常入场 ──
@@ -274,6 +220,97 @@ class OrderExecutor:
             reduce_only=False,
             quote_quantity=False,
         )
+
+    def _create_limit_order(self, instrument_id, order_side, quantity, price):
+        """[maker] 创建 GTC 限价单（被动挂单，享 maker fee）。"""
+        from nautilus_trader.model.enums import TimeInForce
+        if hasattr(price, 'as_decimal'):
+            px = price  # 已是 Price 对象
+        else:
+            # 量化到 tick size，消除浮点尾差（修复 DENIED: price precision > 4）
+            px = self._cache.instrument(instrument_id).make_price(price)
+        if self._order_factory is not None:
+            return self._order_factory.limit(
+                instrument_id=instrument_id,
+                order_side=order_side,
+                quantity=quantity,
+                price=px,
+                time_in_force=TimeInForce.GTC,
+                post_only=True,
+            )
+        return self._cache.instrument(instrument_id).create_order(
+            order_side=order_side,
+            quantity=quantity,
+            price=px,
+            time_in_force=TimeInForce.GTC,
+            post_only=True,
+            reduce_only=False,
+            quote_quantity=False,
+        )
+
+    def _passive_price(self, order_side, ref_price):
+        """[maker] 被动挂单价：买挂 best_bid、卖挂 best_ask；取不到则 ref∓1tick。"""
+        tick = 0.01  # SOL price-based tick fallback
+        try:
+            book = self._cache.book(self._sol_id) if hasattr(self._cache, 'book') else None
+            if book is not None:
+                is_buy = (order_side.name == 'BUY')
+                if is_buy and hasattr(book, 'best_bid_price'):
+                    bp = book.best_bid_price
+                    return float(bp.as_decimal()) if bp else ref_price - tick
+                if (not is_buy) and hasattr(book, 'best_ask_price'):
+                    ap = book.best_ask_price
+                    return float(ap.as_decimal()) if ap else ref_price + tick
+        except Exception as e:
+            logger.warning(f"[maker] book lookup failed, use ref∓tick: {e}")
+        # fallback: 买挂低 1tick、卖挂高 1tick
+        return ref_price - tick if order_side.name == 'BUY' else ref_price + tick
+
+    async def _maker_timeout(self, cid, delay=5.0):
+        """[maker] 超时检查：未完全成交则撤单转 taker 兜底。"""
+        import asyncio
+        try:
+            await asyncio.sleep(delay)
+        except Exception:
+            return
+        p = self._pending.get(cid)
+        if p is None or not p.get('is_maker') or p.get('fallback_done'):
+            return
+        if p.get('accum_qty', 0.0) >= p['expected_qty'] * 0.99:
+            return  # 已完全成交
+        p['fallback_done'] = True
+        # 撤 maker 单
+        try:
+            from nautilus_trader.model.identifiers import ClientOrderId
+            coid = ClientOrderId(cid)
+            order = self._cache.order(coid)
+            if order is not None and self._cancel_order is not None:
+                self._cancel_order(order)
+                logger.info(f"[maker] {cid} timeout, canceled -> market fallback")
+        except Exception as e:
+            logger.warning(f"[maker] cancel {cid} failed: {e}")
+        # market 兜底（全 qty；delta_momentum 0.15 信号稀疏，部分成交重复风险可接受）
+        try:
+            from decimal import Decimal
+            from nautilus_trader.model.enums import TimeInForce
+            instr = self._cache.instrument(self._sol_id)
+            side_obj = p['side_order_obj']
+            qty_obj = instr.make_qty(Decimal(str(p['expected_qty'])))
+            fb = self._create_market_order(self._sol_id, side_obj, qty_obj, TimeInForce.IOC)
+            self._submit_order(fb)
+            fb_cid = str(fb.client_order_id)
+            fp = dict(p)
+            fp['is_maker'] = False
+            fp['fallback_done'] = True
+            fp['accum_qty'] = 0.0
+            fp['accum_notional'] = 0.0
+            fp['total_commission'] = 0.0
+            fp['created_at'] = time.time()
+            self._pending[fb_cid] = fp
+            # fallback 单继承原 maker 单的策略实例归属
+            self._cid_instance[fb_cid] = p['slot'].strategy_id
+        except Exception as e:
+            logger.error(f"[maker] fallback submit {cid} failed: {e}")
 
     def _get_position(self):
         """查询当前 SOLUSDT 的持仓信息。
@@ -387,8 +424,7 @@ class OrderExecutor:
         5. 将通知上下文存入 _pending 字典（deferred 通知机制）
 
         【数量计算逻辑】
-        1. 如果有 size_pct_override（execute 中 Pyamid 裁剪后的比例），
-           进一步按置信度缩放：adj = size_pct_override * (floor + slope * conf)
+        1. 如果有 size_pct_override（策略已按置信度调整的比例），直接使用
         2. 否则使用 _adjusted_size()（按 slot 默认值 + 置信度缩放）
         3. notional = equity * adj_size_pct * leverage
         4. qty = instrument.make_qty(notional / price) —— 自动按交易对精度取整
@@ -421,11 +457,11 @@ class OrderExecutor:
         # 优先使用 size_pct_override（由 execute 的 Pyramid 逻辑提供），
         # 否则使用 slot 默认值并经过置信度缩放
         if size_pct_override is not None:
-            conf = getattr(slot, "confidence", 0.0)
-            floor = 0.25; slope = 0.75
-            scale = floor + slope * conf
-            adj_size_pct = size_pct_override * scale
+            # size_pct_override is already confidence-adjusted by the strategy
+            # (alpha_signal_v3._adjusted_position_pct), use directly
+            adj_size_pct = size_pct_override
         else:
+            # Fallback: use slot default with executor-level confidence scaling
             adj_size_pct = self._adjusted_size(slot)
 
         # 计算名义价值和数量
@@ -433,10 +469,11 @@ class OrderExecutor:
         # make_qty 自动按交易对的最小交易量精度取整
         qty = instr.make_qty(Decimal(str(notional / float(price))))
 
-        # 创建并提交 IOC 市价单
-        order = self._create_market_order(
+        # [maker] 创建并提交 GTC 限价单（挂被动价），超时撤单转 taker 兜底
+        passive_px = self._passive_price(side, price)
+        order = self._create_limit_order(
             instrument_id=self._sol_id, order_side=side,
-            quantity=qty, time_in_force=TimeInForce.IOC,
+            quantity=qty, price=passive_px,
         )
         self._submit_order(order)
         # 更新上次交易时间戳（用于冷却检查）
@@ -449,17 +486,28 @@ class OrderExecutor:
         # 存入 _pending，等 on_fill 回调后使用真实 VWAP 发送通知
         self._pending[cid] = {
             "type": "entry",              # 通知类型：入场
+            "is_maker": True,             # [maker] 限价单标记
+            "side_order_obj": side,       # [maker] OrderSide 对象（兜底用）
             "slot": slot,                 # 关联的策略 slot
             "side": side_str,             # 交易方向
             "reason": reason,             # 入场原因
             "estimated_price": price,     # 预估价（仅退场时使用）
             "notional": notional,         # 名义价值
             "expected_qty": float(qty),   # 预期成交数量
+            "_open_passive_px": passive_px,  # [maker] 调试用
             "accum_qty": 0.0,             # 累计成交数量（填充用）
             "accum_notional": 0.0,        # 累计成交名义价值（用于计算 VWAP）
             "total_commission": 0.0,      # 累计手续费
             "created_at": time.time(),    # 创建时间（用于超时判断）
         }
+        # 记录 cid->instance 映射，供 data_manage 落库区分策略
+        self._cid_instance[cid] = slot.strategy_id
+        # [maker] 调度超时检查
+        import asyncio
+        try:
+            asyncio.get_event_loop().create_task(self._maker_timeout(cid, 5.0))
+        except Exception as _e:
+            logger.warning(f"[maker] schedule timeout failed: {_e}")
 
     def has_pending_close_for(self, slot) -> bool:
         """检查该策略是否已有待确认的平仓订单。
@@ -481,6 +529,10 @@ class OrderExecutor:
             if p.get("slot") is slot and p.get("type") == "close":
                 return True
         return False
+
+    def instance_for_cid(self, cid: str) -> str | None:
+        """client_order_id -> 策略实例ID（如 AlphaV2-005），供 data_manage 落库区分策略。"""
+        return self._cid_instance.get(cid)
 
     def flat(self, slot, reason="", price=None):
         """平仓执行 —— 平掉策略的当前持仓。
@@ -532,10 +584,11 @@ class OrderExecutor:
                 price = 0.0
         exit_px = price
 
-        # 创建并提交 IOC 市价单（平仓数量 = 当前持仓全部数量）
-        order = self._create_market_order(
+        # [maker] 创建并提交 GTC 限价单（挂被动价），超时撤单转 taker 兜底
+        passive_px = self._passive_price(side, exit_px)
+        order = self._create_limit_order(
             instrument_id=self._sol_id, order_side=side,
-            quantity=pos.quantity, time_in_force=TimeInForce.IOC,
+            quantity=pos.quantity, price=passive_px,
         )
         self._submit_order(order)
 
@@ -551,6 +604,8 @@ class OrderExecutor:
         cid = str(order.client_order_id)
         self._pending[cid] = {
             "type": "close",              # 通知类型：平仓
+            "is_maker": True,             # [maker] 限价单标记
+            "side_order_obj": side,       # [maker] OrderSide 对象（兜底用）
             "slot": slot,                 # 关联的策略 slot
             "side_was": side_was,         # 平仓前的方向
             "entry_px": entry_px,         # 开仓均价（用于盈亏计算）
@@ -559,9 +614,17 @@ class OrderExecutor:
             "expected_qty": float(pos.quantity.as_decimal()),  # 预期平仓数量
             "accum_qty": 0.0,             # 累计成交数量（填充用）
             "accum_notional": 0.0,        # 累计成交名义价值（用于计算 VWAP）
-            "total_commission": 0.0,      # 累计手续费
+            "total_commission": slot.entry_commission,  # 带入入场手续费（双边手续费计算）
             "created_at": time.time(),    # 创建时间（用于超时判断）
         }
+        # 记录 cid->instance 映射，供 data_manage 落库区分策略
+        self._cid_instance[cid] = slot.strategy_id
+        # [maker] 调度超时检查
+        import asyncio
+        try:
+            asyncio.get_event_loop().create_task(self._maker_timeout(cid, 5.0))
+        except Exception as _e:
+            logger.warning(f"[maker] schedule timeout failed: {_e}")
         return True
 
     def flat_all(self, slots, reason="shutdown"):
@@ -650,6 +713,8 @@ class OrderExecutor:
                 slot.strategy_id, str(self._sol_id), pending["side"],
                 vwap, pending["accum_qty"], pending["notional"], pending["reason"],
             ))
+            # 保存入场手续费到 slot，供平仓时计算双边手续费后的净盈亏
+            slot.entry_commission = pending["total_commission"]
 
         elif pending["type"] == "close":
             # ── 平仓成交确认 ──
@@ -763,6 +828,8 @@ class OrderExecutor:
                 return
             # 部分开仓：确认部分仓位并更新 slot 状态
             slot.open_position(pending["side"], vwap)
+            # 保存入场手续费到 slot（部分成交也需记录，后续平仓用）
+            slot.entry_commission = pending["total_commission"]
             _notify(slot, fmt_entry(
                 slot.strategy_id, str(self._sol_id), pending["side"],
                 vwap, pending["accum_qty"], pending["notional"],
