@@ -86,6 +86,7 @@ import trading_base_pb2 as pb                                            # proto
 
 # —— gRPC 服务（策略通信） --------------------------------------------------------
 
+from base.registration import RegistrationManager
 from base.grpc_server import TradingBaseServicer, start_grpc_server      # gRPC服务端：接收策略注册+Bar推送
 
 # —— 全局变量 --------------------------------------------------------------------
@@ -418,6 +419,11 @@ async def main():
     base_strat = BaseStrategy(registry)
     node.trader.add_strategy(base_strat)
 
+    # RegistrationManager: poll strategy_instances table, sync pending/active status
+    _reg_manager = RegistrationManager(registry, pool, symbol="SOLUSDT-PERP")
+    asyncio.create_task(_reg_manager.run())
+    logger.info("RegistrationManager task scheduled")
+
     # 步骤8: 构建 NT 节点
     # node.build() 会内部组装所有组件：
     #   - 初始化数据引擎、执行引擎
@@ -439,7 +445,8 @@ async def main():
     #   - 0.0.0.0:50051                 TCP端口（备选通信方式）
     grpc_servicer = TradingBaseServicer(
         telegram_bot_token=cfg.telegram.bot_token,         # Telegram 机器人 Token
-        telegram_chat_id=str(cfg.telegram.admin_chat_id),  # 管理员聊天ID
+        telegram_chat_id=str(cfg.telegram.admin_chat_id),
+        pool=pool,  # 管理员聊天ID
     )
     grpc_server = await start_grpc_server(grpc_servicer)
     logger.info("gRPC server started (unix:///tmp/nt_base_grpc.sock + :50051)")

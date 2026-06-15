@@ -741,14 +741,15 @@ class DataManageActor(Actor):
                     await conn.execute(
                         """
                         INSERT INTO fills (fill_id, order_id, symbol, side, price,
-                                            quantity, fee, fee_currency, ts_event, raw)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)
+                                            quantity, fee, fee_currency, ts_event, raw, instance_id)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11)
                         ON CONFLICT (fill_id) DO NOTHING
                         """,
                         fill_id, order_id, symbol, side,
                         fill_price, fill_qty, fee, fee_ccy,
                         _ns_to_dt(event.ts_event),
                         _safe_json({"liquidity": event.liquidity_side.name if event.liquidity_side else None}),
+                        inst,
                     )
                 # 向 Telegram 推送成交事件
                 await self._emit_event_row("INFO", "trade_fill", {

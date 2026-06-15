@@ -112,7 +112,7 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
         self._get_price = get_price
         logger.info("gRPC 执行上下文已注入（executor + registry）")
 
-    def __init__(self, telegram_bot_token: str = "", telegram_chat_id: str = ""):
+    def __init__(self, telegram_bot_token: str = "", telegram_chat_id: str = "", pool=None):
         """
         初始化 gRPC 服务端。
 
@@ -144,6 +144,7 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
         """
         self._default_bot_token = telegram_bot_token
         self._default_chat_id = telegram_chat_id
+        self._pool = pool
         self._strategies: dict[str, dict] = {}
         self._factor_engine = FactorEngine()
         # Bar 推送队列：strategy_id → asyncio.Queue（容量 100）
@@ -201,6 +202,16 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
         from shared.env import cfg
         token = cfg.telegram.bot_token
         chat_id = str(cfg.telegram.admin_chat_id)
+        if self._pool is not None:
+            try:
+                _row = await self._pool.fetchrow(
+                    "SELECT telegram_bot_token, telegram_chat_id FROM strategy_instances WHERE instance_id=$1", sid)
+                if _row and _row["telegram_bot_token"]:
+                    token = _row["telegram_bot_token"]
+                if _row and _row["telegram_chat_id"]:
+                    chat_id = str(_row["telegram_chat_id"])
+            except Exception as _e:
+                logger.warning(f"gRPC 注册 {sid}: strategy_instances telegram read failed: {_e}")
         logger.info(f"gRPC 注册 {sid}: Telegram 已配置 (chat={chat_id})")
 
         # 创建策略注册条目
@@ -267,12 +278,33 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
           断连时 → 设置 disconnected_at → main.py 的 RiskLoop 检测到宽限期超时
         """
         logger.info(f"[SUB] SubscribeBars 进入: 队列={list(self._bar_queues.keys())}")
-        sid = list(self._bar_queues.keys())[-1] if self._bar_queues else None
+        sid = request.strategy_id or (list(self._bar_queues.keys())[-1] if self._bar_queues else None)
         if sid is None:
             logger.error("[SUB] 没有已注册的策略")
             await context.abort(grpc.StatusCode.NOT_FOUND, "没有已注册的策略")
             return
 
+        # prefill: stream historical 1m bars first to eliminate client regime warmup
+        if self._pool is not None and getattr(request, "symbol", ""):
+            _pf = 0
+            try:
+                _rows = await self._pool.fetch(
+                    "SELECT ts, open, high, low, close, volume FROM bars "
+                    "WHERE symbol=$1 AND timeframe=$2 ORDER BY ts DESC LIMIT 900",
+                    request.symbol, "1m")
+                for _r in reversed(list(_rows)):
+                    yield pb.Bar(
+                        symbol=request.symbol,
+                        ts_ns=int(_r["ts"].timestamp() * 1e9),
+                        open=float(_r["open"]), high=float(_r["high"]),
+                        low=float(_r["low"]), close=float(_r["close"]),
+                        volume=float(_r["volume"]),
+                    )
+                    _pf += 1
+                if _pf:
+                    logger.info(f"[SUB] prefilled {_pf} historical bars for {sid}")
+            except Exception as _e:
+                logger.warning(f"[SUB] prefill failed for {sid}: {_e}")
         queue = self._bar_queues[sid]
         logger.info(f"[SUB] 开始为 {sid} 推送流, 队列大小={queue.qsize()}")
 

@@ -44,6 +44,7 @@ message UnregisterAck {
 
 message BarRequest {
   string symbol = 1;
+  string strategy_id = 2;
 }
 
 message Bar {
