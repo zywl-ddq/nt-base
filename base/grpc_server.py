@@ -180,15 +180,18 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
         """
         sid = request.strategy_id
         if sid in self._strategies:
-            # 重连处理：清除断连标记，允许重新订阅 Bar 流
+            # 重连：清除断连标记，复用并刷新该策略独占的 FactorEngine
             self._strategies[sid]["disconnected_at"] = None
-            logger.info(f"gRPC 重新注册（断连重连）: {sid}")
-            return pb.RegisterAck(ok=True)
+            fe = self._strategies[sid].get("factor_engine") or FactorEngine()
+            self._strategies[sid]["factor_engine"] = fe
+            logger.info(f"gRPC 重新注册（断连重连）: {sid}，刷新因子")
+        else:
+            fe = FactorEngine()
 
-        # 逐一遍历因子，编译并注册到 FactorEngine
+        # 逐一 register 因子到该策略独占的 FactorEngine
         for fd in request.factors:
             try:
-                self._factor_engine.register(
+                fe.register(
                     name=fd.name,
                     code=fd.code,
                     params=dict(fd.params) if fd.params else None,
@@ -216,7 +219,8 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
 
         # 创建策略注册条目
         self._strategies[sid] = {
-            "config": request,                       # 完整配置 protobuf
+            "factor_engine": fe,                     # 每策略独占 FactorEngine
+            "config": request,                        # 完整配置 protobuf
             "registered_at": time.time(),             # 注册时间
             "required_fields": list(request.required_fields),  # 所需 Bar 字段
             "telegram_bot_token": token,              # Telegram bot token
@@ -228,8 +232,20 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
         self._bar_queues[sid] = asyncio.Queue(maxsize=100)      # Bar 推送队列
         self._control_queues[sid] = asyncio.Queue(maxsize=50)   # 控制指令队列
 
+        # 鏇存柊鏁版嵁搴撶姸鎬佷负 active 鈥斺€?绛栫暐宸插疄闄呴€氳繃 gRPC 娉ㄥ唽
+        if self._pool is not None:
+            try:
+                await self._pool.execute(
+                    "INSERT INTO strategy_instances (instance_id, status, activated_at) "
+                    "VALUES ($1, 'active', NOW()) "
+                    "ON CONFLICT (instance_id) DO UPDATE SET status='active', activated_at=NOW()",
+                    sid,
+                )
+            except Exception as _e:
+                logger.warning(f"gRPC Register {sid}: strategy_instances update failed: {_e}")
+
         logger.info(
-            f"gRPC 注册完成: {sid} 因子={self._factor_engine.registered_names()} "
+            f"gRPC 注册完成: {sid} 因子={fe.registered_names()} "
             f"所需字段={request.required_fields}"
         )
         return pb.RegisterAck(ok=True)
@@ -604,7 +620,7 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
         """
         # 如果没有预计算因子，在此计算
         if factors is None:
-            factors = self._factor_engine.execute_all(df_bars)
+            factors = {}  # 每策略 FactorEngine 已算好，build_bar 不再走全局
 
         bar = pb.Bar(
             symbol=symbol, ts_ns=ts_ns,

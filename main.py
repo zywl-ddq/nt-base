@@ -420,6 +420,10 @@ async def main():
     node.trader.add_strategy(base_strat)
 
     # RegistrationManager: poll strategy_instances table, sync pending/active status
+
+    # 鍚姩鏃堕噸缃墍鏈夌瓥鐣ュ疄渚嬬姸鎬?鈥斺€?绛栫暐鍙湪 trading-v2 閫氳繃 gRPC Register 鍚庢墠瀛樺湪
+    await pool.execute("UPDATE strategy_instances SET status='pending'")
+    logger.info("All strategy_instances reset to pending (fresh start)")
     _reg_manager = RegistrationManager(registry, pool, symbol="SOLUSDT-PERP")
     asyncio.create_task(_reg_manager.run())
     logger.info("RegistrationManager task scheduled")
@@ -823,34 +827,7 @@ async def main():
                 #   3. 收集结果并返回 dict
                 # 返回的 factors dict 包含因子名称->值的映射
                 # 例如: {"cvd_divergence": 0.5, "residual_momentum": -0.3, "channel_breakout": 0.8}
-                factors = grpc_servicer._factor_engine.execute_all(df)
-                logger.info(f"factors computed: {factors}")
-
-                # —— 构建并推送 Bar -------------------------------------------------
-                # build_bar 构建 protobuf Bar 消息
-                # push_bar 通过 gRPC Server Streaming 推送给所有注册客户端
-                pb_bar = grpc_servicer.build_bar(
-                    symbol=SYMBOL,
-                    ts_ns=bar.ts_event,                       # 纳秒时间戳
-                    open_p=float(bar.open), high=float(bar.high),
-                    low=float(bar.low), close=float(bar.close),
-                    volume=volume, delta=delta,
-                    taker_buy=buyer_vol, taker_sell=seller_vol,
-                    btc_close=_latest_btc_close,
-                    df_bars=df,                                # 完整 DataFrame（用于自定义因子）
-                    factors=factors,                           # 所有因子值
-                )
-
-                # —— 构建每个策略的 PositionState -----------------------------------
-                # PositionState 包含 nt-base 本地的持仓信息（由 tick 退出管理）：
-                #   - 持仓方向（多/空）
-                #   - 开仓均价
-                #   - 持仓 bar 数
-                #   - 持仓期间最高/最低价
-                #   - 当前 ATR
-                #   - 是否已激活保本
-                #
-                # trading-v2 用这些信息做策略决策
+                # —— 构建每个策略的 PositionState（持仓快照）---
                 position_states = {}
                 for slot in registry.all_slots():
                     if slot.has_position:
@@ -858,16 +835,40 @@ async def main():
                         ps = pb.PositionState(
                             side=side,
                             entry_price=slot.entry_price,
-                            bars_held=int(slot.held_sec / 60),              # 秒转分钟
-                            highest_price=slot.highest_since_entry,          # 持仓期间最高价
-                            lowest_price=slot.lowest_since_entry,            # 持仓期间最低价
-                            current_atr=slot.current_atr,                    # 当前 ATR
+                            bars_held=int(slot.held_sec / 60),
+                            highest_price=slot.highest_since_entry,
+                            lowest_price=slot.lowest_since_entry,
+                            current_atr=slot.current_atr,
                             breakeven_activated=getattr(slot, "breakeven_activated", False),
                         )
                         position_states[slot.strategy_id] = ps
 
-                # 推送给 gRPC 客户端（trading-v2）
-                grpc_servicer.push_bar(pb_bar, position_states=position_states)
+                # —— 每策略独立 FactorEngine + 独立 Bar 推送 ---
+                # 替代原"全局 execute_all + 单 bar 推所有"：每策略只算/推送自己的因子
+                for sid, sinfo in grpc_servicer._strategies.items():
+                    fe = sinfo.get("factor_engine")
+                    if fe is None:
+                        continue
+                    factors = fe.execute_all(df)
+                    logger.info(f"[{sid}] factors computed: {factors}")
+                    pb_bar = grpc_servicer.build_bar(
+                        symbol=SYMBOL,
+                        ts_ns=bar.ts_event,
+                        open_p=float(bar.open), high=float(bar.high),
+                        low=float(bar.low), close=float(bar.close),
+                        volume=volume, delta=delta,
+                        taker_buy=buyer_vol, taker_sell=seller_vol,
+                        btc_close=_latest_btc_close,
+                        df_bars=df,
+                        factors=factors,
+                    )
+                    if sid in position_states:
+                        pb_bar.position.CopyFrom(position_states[sid])
+                    try:
+                        grpc_servicer._bar_queues[sid].put_nowait(pb_bar)
+                    except asyncio.QueueFull:
+                        logger.warning(f"策略 {sid} 的 Bar 队列已满，丢弃旧数据")
+
             else:
                 # buffer 不足或 gRPC 未就绪时使用空因子字典
                 factors = {}

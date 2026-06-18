@@ -128,13 +128,11 @@ class RegistrationManager:
                     continue
 
                 # ── 激活条件 ──────────────────────────────────────
-                # pending 和 active 都是"应该运行"的状态
-                if status == "pending" and prev is None:
+                # active and first seen -> activate (pending skipped:
+                # only gRPC Register promotes status to active)
+                if status == "active" and prev is None:
                     await self._activate(conn, row)
-                elif status == "active" and prev is None:
-                    await self._activate(conn, row)
-                # ── 注销条件 ──────────────────────────────────────
-                # 只有从 active -> stopping 才执行注销
+                # -- deregistration condition --
                 elif status == "stopping" and prev == "active":
                     await self._deactivate(conn, row)
                 # ── 其他状态 ──────────────────────────────────────
