@@ -441,8 +441,9 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
         executor = self._executor
         registry = self._registry
         if executor is None or registry is None:
-            # 执行上下文未就绪，信号暂存但不执行
-            return pb.SignalAck(accepted=True)
+            # 执行上下文未就绪：信号已暂存（供日志/统计），但未下单。
+            # 返回 accepted=False 明确告知客户端未执行，避免静默丢失误判。
+            return pb.SignalAck(accepted=False, reject_reason="execution context not ready")
 
         # 映射 gRPC 方向到内部方向值
         pb_dir = request.direction
@@ -508,12 +509,28 @@ class TradingBaseServicer(pb_grpc.TradingBaseServicer):
         return pb.SignalAck(accepted=True)
 
     async def GetState(self, request: pb.StateRequest, context) -> pb.StateResponse:
-        """获取策略状态 RPC（一元 RPC）。返回仓位权益、每日盈亏、熔断状态等。"""
-        return pb.StateResponse(equity=0.0, daily_pnl=0.0, circuit_breaker=False)
+        """获取策略状态 RPC（一元 RPC）。
+
+        StateRequest 无策略标识，nt-base 当前未实现按策略聚合的权益/日盈亏
+        查询；circuit_breaker 反映 registry 中是否存在已熔断槽，equity/daily_pnl
+        暂返回 0（需 portfolio 聚合）。trading-v2 当前不调用此 RPC。
+        """
+        circuit_breaker = False
+        if self._registry is not None:
+            try:
+                circuit_breaker = any(getattr(s, "tripped", False) for s in self._registry.all_slots())
+            except Exception:
+                circuit_breaker = False
+        return pb.StateResponse(equity=0.0, daily_pnl=0.0, circuit_breaker=circuit_breaker)
 
     async def ClosePosition(self, request: pb.CloseRequest, context) -> pb.CloseAck:
-        """平仓 RPC（一元 RPC）。由 trading-v2 或手动控制触发。"""
-        return pb.CloseAck(ok=True)
+        """平仓 RPC（一元 RPC）。
+
+        未实现：CloseRequest 无目标标识，且当前无调用方。返回 ok=False 而非
+        假成功，避免调用方误判仓位已平（残留风险）。
+        """
+        logger.warning("ClosePosition RPC called but not implemented (CloseRequest has no target)")
+        return pb.CloseAck(ok=False)
 
     # ── 由 main.py 的 Bar 推送循环调用 ─────────────────────
 

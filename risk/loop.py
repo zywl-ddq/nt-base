@@ -243,6 +243,16 @@ class RiskLoop:
                         # 跳出内层 for 循环，不再执行后续检查
                         break
 
+            # ---- 兜底：熔断(tripped)但仍有持仓的 slot 持续重发平仓 ----
+            # get_active_slots() 会过滤掉 tripped slot；若日亏损熔断触发时的
+            # flat() 因下单异步/被拒而未完成，仓位会残留并被风控循环永久跳过，
+            # 导致止损/止盈不再监控（丢止损）。这里每秒对这类 slot 重发平仓，
+            # 由 executor.has_pending_close_for 防止重复下单。
+            for slot in self._registry.all_slots():
+                if slot.tripped and slot.has_position:
+                    if not self._executor.has_pending_close_for(slot):
+                        self._executor.flat(slot, "tripped-but-open (risk fallback)")
+
             # 休眠 interval 秒（默认 1 秒）
             # 使用 asyncio.sleep 而非 time.sleep，不阻塞事件循环
             await asyncio.sleep(self._interval)

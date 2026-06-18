@@ -845,7 +845,8 @@ async def main():
 
                 # —— 每策略独立 FactorEngine + 独立 Bar 推送 ---
                 # 替代原"全局 execute_all + 单 bar 推所有"：每策略只算/推送自己的因子
-                for sid, sinfo in grpc_servicer._strategies.items():
+                # list() 快照防并发注销修改 dict（RuntimeError: dictionary changed size）
+                for sid, sinfo in list(grpc_servicer._strategies.items()):
                     fe = sinfo.get("factor_engine")
                     if fe is None:
                         continue
@@ -868,6 +869,9 @@ async def main():
                         grpc_servicer._bar_queues[sid].put_nowait(pb_bar)
                     except asyncio.QueueFull:
                         logger.warning(f"策略 {sid} 的 Bar 队列已满，丢弃旧数据")
+                    except KeyError:
+                        # 策略在迭代快照后、推送前被注销（_bar_queues 已删），跳过
+                        logger.warning(f"策略 {sid} 已注销，bar 队列不存在，跳过推送")
 
             else:
                 # buffer 不足或 gRPC 未就绪时使用空因子字典
