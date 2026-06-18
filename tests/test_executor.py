@@ -5,40 +5,16 @@ tests/test_executor.py -- OrderExecutor 单元测试
 
 测试目标
 --------
-base/executor.py 中的 OrderExecutor 类：
-- 入场执行（LONG/SHORT 信号）
-- 同方向忽略（已有 LONG 持仓时再次收到 LONG 信号应被忽略）
-- 平仓操作（flat）
-
-测试覆盖场景
------------
-test_order_executor_entry_and_flat（单一集成测试用例）：
-  1. 构造 MockInstrument / MockCache / MockPortfolio / MockPosition
-     模拟 NautilusTrader 的运行环境。
-  2. 创建 OrderExecutor 和 StrategySlot，配置仓位参数
-     （20% 资金、2 倍杠杆、0 冷却时间）。
-  3. 执行 LONG 信号：
-     - 验证返回结果包含 "entry"
-     - 验证 slot 状态变为 has_position=True, entry_side="LONG"
-     - 验证 submit_order 被调用且参数格式正确
-  4. 再次发送 LONG 信号（同方向）：
-     - 验证返回 "ignored: same direction"
-     - 验证 submit_order 未被再次调用（仍是 1 次）
-  5. 执行 flat 平仓：
-     - 验证返回 True
-     - 验证 slot 状态变为 has_position=False
-     - 验证 submit_order 被调用（累计 2 次）
+base/executor.py 中的 OrderExecutor 类（maker 限价单 + max_concurrent=1 语义）：
+- 入场执行（LONG 信号）→ 提交 maker 限价单；has_position 由 on_fill 回调设置（deferred）
+- 已有持仓时拒绝新入场（max_concurrent=1）
+- 平仓（flat）→ 提交反向 maker 限价单；on_fill 后 slot 退出持仓
 
 注意事项
 --------
-- OrderExecutor 内部使用 cache.instrument().create_order() 创建订单
-  MockInstrument 的 create_order 返回字符串而非实际订单对象
-  因此断言只需验证 submit_order 被调用次数和返回值
-- slot 的 has_position 由 executor.execute() 设置，
-  flat 后由 executor.flat() 清除
-
-作者: nt-base system
-版本: 1.0.0
+- MockInstrument 需提供 make_price / make_qty（maker 限价单路径会调用）
+- MockInstrument.create_order 返回 MockOrder（带 client_order_id，executor 据此追踪 _pending）
+- 持仓状态由 on_fill 回调驱动（deferred 通知机制），测试需手动调用 on_fill 模拟成交
 """
 """Unit tests for OrderExecutor."""
 import pytest
@@ -47,15 +23,28 @@ from base.slot import StrategySlot
 from base.signal_protocol import StrategySignal
 
 
+class MockOrder:
+    """模拟 NT 订单对象，提供 client_order_id 供 executor 追踪 _pending。"""
+    _counter = 0
+
+    def __init__(self):
+        MockOrder._counter += 1
+        self.client_order_id = f"mock-{MockOrder._counter}"
+
+
 class MockInstrument:
     def __init__(self, last_price=100.0):
         self.last_price = last_price
 
     def create_order(self, **kwargs):
-        return f"OrderSide={kwargs.get('order_side')}, Qty={kwargs.get('quantity')}"
+        return MockOrder()
 
     def make_qty(self, qty):
         return qty
+
+    def make_price(self, price):
+        # maker 限价单路径会调用以量化到 tick；测试用固定值，直接返回。
+        return price
 
 
 class MockPositionSide:
@@ -135,7 +124,7 @@ def test_order_executor_entry_and_flat():
         portfolio=portfolio,
         submit_order=submit_order,
         cache=cache,
-        order_factory=None, # will fall back to cache instrument create_order under mock
+        order_factory=None,  # 回退到 MockInstrument.create_order
     )
 
     slot = StrategySlot(
@@ -146,28 +135,37 @@ def test_order_executor_entry_and_flat():
         cooldown_sec=0.0,
     )
 
-    # 1. Test entry LONG signal
+    # 1. 无持仓 → 入场 LONG（提交 maker 限价单）
     sig = StrategySignal(direction=1, reason="Test entry long")
     res = executor.execute(slot, sig, current_price=100.0)
-
     assert "entry" in res
+    assert len(submitted_orders) == 1
+    # deferred：订单已提交，has_position 等 on_fill 回调确认
+    cid_entry = submitted_orders[0].client_order_id
+    assert cid_entry in executor._pending
+    assert executor._pending[cid_entry]["type"] == "entry"
+    assert executor.instance_for_cid(cid_entry) == "test-strategy"
+
+    # 2. 模拟成交回调 → slot 进入持仓（真实 VWAP = 100.0）
+    cache.positions = [MockPosition("LONG", 1.0)]
+    executor.on_fill(cid_entry, last_px=100.0, last_qty=1.0, commission=0.0)
     assert slot.has_position
     assert slot.entry_side == "LONG"
     assert slot.entry_price == 100.0
-    assert len(submitted_orders) == 1
-    assert "OrderSide" in submitted_orders[0]
 
-    # Mock position in cache
-    cache.positions = [MockPosition("LONG", 4.0)]
+    # 3. 已有持仓 → 拒绝新入场（max_concurrent=1）
+    res_rejected = executor.execute(slot, sig, current_price=101.0)
+    assert res_rejected == "rejected: position exists (max_concurrent=1)"
+    assert len(submitted_orders) == 1  # 未新增订单
 
-    # 2. Test execute with same direction LONG signal (should be ignored)
-    res_ignored = executor.execute(slot, sig, current_price=101.0)
-    assert res_ignored == "ignored: same direction"
-
-    # 3. Test flattening
-    flattened = executor.flat(slot, reason="Stop triggered")
+    # 4. 平仓（提交反向 maker 限价单）
+    flattened = executor.flat(slot, reason="Stop triggered", price=101.0)
     assert flattened
-    assert not slot.has_position
-    cache.positions = []
     assert len(submitted_orders) == 2
-    assert "OrderSide" in submitted_orders[1]
+    cid_close = submitted_orders[1].client_order_id
+    assert executor._pending[cid_close]["type"] == "close"
+
+    # 5. 模拟平仓成交 → slot 退出持仓
+    cache.positions = []
+    executor.on_fill(cid_close, last_px=101.0, last_qty=1.0, commission=0.0)
+    assert not slot.has_position

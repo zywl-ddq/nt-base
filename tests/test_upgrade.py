@@ -55,6 +55,13 @@ import pandas as pd
 import numpy as np
 from collections import deque
 
+# 这些测试覆盖的模块（factor.compute / strategy.signal / strategy.exit_manager）
+# 已随 v2 架构迁移到 trading-v2 项目，nt-base 内不再存在（strategy/ 为空目录）。
+# 整体跳过；若日后在 trading-v2 侧运行，移除此 pytestmark 即可。
+pytestmark = pytest.mark.skip(
+    reason="modules moved to trading-v2: factor/strategy.* not present in nt-base",
+)
+
 # Test T1.1: trend_regime returns (direction, confidence)
 class TestTrendRegimeV2:
     def test_strong_uptrend(self):

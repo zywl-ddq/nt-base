@@ -118,6 +118,10 @@ class TestCheckAll:
     def test_check_all_trigger(self):
         s = make_slot(stop_pct=0.03, take_pct=0.06, max_hold_sec=3600)
         s.open_position("LONG", 100.0)
-        actions = check_all(s, 95.0)  # -5% (trips stop loss)
-        assert len(actions) == 1
-        assert actions[0].kind == "stop_loss"
+        # -5% 时 check_trail 与 check_stop 同时触发——开仓瞬间 trail 线
+        # (highest_since_entry - stop_pct*entry = 100-3 = 97) 与硬止损线重合，
+        # 这是 check_all “报告全部触发项”语义下的正确行为（RiskLoop 实际短路）。
+        actions = check_all(s, 95.0)
+        kinds = [a.kind for a in actions]
+        assert "stop_loss" in kinds                 # 硬止损必然触发
+        assert all(a.should_exit for a in actions)  # 返回的都是退出动作
