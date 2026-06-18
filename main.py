@@ -128,6 +128,7 @@ class BaseStrategy(Strategy):
         self._registry = registry                          # 策略注册表引用
         self._executor = None                              # 订单执行器（on_start 时创建）
         self._risk_loop = None                             # 风控循环（on_start 时创建）
+        self._sec_factor_loop = None                       # 秒级公共因子循环（main 中创建注入）
         self._latest_price: dict[str, float] = {SYMBOL: 0.0}  # 最新价格缓存，key=品种ID
 
     def on_start(self):
@@ -176,6 +177,11 @@ class BaseStrategy(Strategy):
         # 启动风控循环异步任务（daemon 风格，持续运行）
         asyncio.create_task(self._risk_loop.start())
         self.log.info("RiskLoop started")
+
+        # 启动秒级公共因子循环（由 main() 创建并注入；每秒计算，分钟桶聚合并入 Bar.factors）
+        if self._sec_factor_loop:
+            asyncio.create_task(self._sec_factor_loop.start())
+            self.log.info(f"SecFactorLoop started: {self._sec_factor_loop.registered()}")
 
         # 将执行上下文注入 gRPC servicer
         # 这样 trading-v2 提交的 Signal 能通过 gRPC 通道直接调用 OrderExecutor
@@ -278,6 +284,8 @@ class BaseStrategy(Strategy):
         """
         if self._risk_loop:
             asyncio.create_task(self._risk_loop.stop())          # 停止风控循环
+        if self._sec_factor_loop:
+            asyncio.create_task(self._sec_factor_loop.stop())    # 停止秒级公共因子循环
         if self._executor:
             self._executor.flush_pending()                       # 清空 pending 通知
             self._executor.flat_all(self._registry.all_slots(), "on_stop")  # 全部平仓
@@ -530,6 +538,19 @@ async def main():
         # 注入 BaseStrategy 引用，供 data_manage 落库时按 cid 反查策略实例
         dm_actor.bind_base_strategy(base_strat)
 
+        # —— 秒级公共因子循环（注册制 / HOOK，可插拔）——
+        # 每秒计算公共因子（OBI/CVD/...），样本按日历分钟分桶；
+        # 1m bar 到达时聚合统计量（mean/std/min/max/skew/kurt）并入 Bar.factors。
+        # 新增因子 = 在 base/sec_factors/ 加文件 + 在此 register 一行。
+        from base.sec_factor import SecFactorLoop
+        from base.sec_factors import OBIFactor, CVDFactor
+        sec_factor_loop = SecFactorLoop(interval=1.0)
+        sec_factor_loop.register(OBIFactor(interval_sec=3, symbol=SYMBOL))
+        sec_factor_loop.register(CVDFactor(interval_sec=1))
+        sec_factor_loop.bind_books(lambda: dm_actor._books)
+        base_strat._sec_factor_loop = sec_factor_loop
+        logger.info("SecFactorLoop created and bound to dm_actor._books")
+
         # —— Monkey-patch 前置: 保存原始方法引用 -----------------------------------
         # 保存原始的 on_bar 和 on_trade_tick 方法引用
         # 在 monkey-patch 中调用，确保原始功能（DB写入等）不受影响
@@ -612,6 +633,10 @@ async def main():
             # 获取 tick 价格并更新价格缓存和风控循环
             tick_price = float(tick.price)
             base_strat.update_price(symbol, tick_price)
+
+            # 喂给秒级公共因子循环（CVD 等累积型因子；此处已过滤只 SOL tick）
+            if base_strat._sec_factor_loop:
+                base_strat._sec_factor_loop.on_tick(tick)
 
             # 声明非局部变量
             nonlocal _tick_exit_managers
@@ -846,11 +871,15 @@ async def main():
                 # —— 每策略独立 FactorEngine + 独立 Bar 推送 ---
                 # 替代原"全局 execute_all + 单 bar 推所有"：每策略只算/推送自己的因子
                 # list() 快照防并发注销修改 dict（RuntimeError: dictionary changed size）
+                # 秒级公共因子：该分钟聚合一次（aggregate 会 pop 桶），所有策略共用同一份统计量
+                sec_stats = base_strat._sec_factor_loop.aggregate(bar.ts_event) if base_strat._sec_factor_loop else {}
                 for sid, sinfo in list(grpc_servicer._strategies.items()):
                     fe = sinfo.get("factor_engine")
                     if fe is None:
                         continue
                     factors = fe.execute_all(df)
+                    if sec_stats:
+                        factors.update(sec_stats)   # 并入秒级统计（obi_3s_mean 等）
                     logger.info(f"[{sid}] factors computed: {factors}")
                     pb_bar = grpc_servicer.build_bar(
                         symbol=SYMBOL,
