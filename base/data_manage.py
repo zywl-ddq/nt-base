@@ -60,6 +60,7 @@ from typing import Any
 import asyncpg
 from nautilus_trader.common.actor import Actor, ActorConfig
 from nautilus_trader.model.data import Bar, BarType, TradeTick
+from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.events import (
     OrderEvent,
     OrderFilled,
@@ -930,7 +931,9 @@ class DataManageActor(Actor):
                 try:
                     order = delta.order
                     p, s = float(order.price), float(order.size)
-                    sk = "bids" if str(order.side) == "BUY" else "asks"
+                    # NT 的 OrderSide 枚举 str 是数字（'1'/'2'），必须用枚举比较，
+                    # 不能用 str(order.side)=="BUY"（否则所有档都进 asks，bids 永空）
+                    sk = "bids" if order.side == OrderSide.BUY else "asks"
                     if delta.is_delete or s == 0.0:
                         book[sk].pop(p, None)
                     else:
